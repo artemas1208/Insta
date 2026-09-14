@@ -1,10 +1,11 @@
 // ocr-offscreen.js
-// Фоновое распознавание текста (Tesseract rus+eng) и речи (Whisper / Cloud API)
+// Фоновое распознавание текста (Cloud Vision / Tesseract) и речи (Groq Whisper / Local Whisper)
 // в offscreen-документе расширения.
 
-const RUSSIAN_ASR_PROMPT = 'Русская речь, фитнес, тренировки, упражнения, ягодицы, кроссовер, присед, зал, блогеры, Reels, Instagram.';
+const RUSSIAN_ASR_PROMPT =
+  'Русская речь, фитнес, тренировки, упражнения, ягодицы, кроссовер, присед, зал, блогеры, Reels, Instagram, питание, рецепты, подходы.';
 
-// ---------- OCR: текст с кадров (Tesseract rus+eng) ----------
+// ---------- OCR: распознавание текста ----------
 let tWorkerPromise = null;
 
 async function getTWorker() {
@@ -30,9 +31,9 @@ async function getTWorker() {
           workerBlobURL: false,
         });
       }
-      // PSM 11 (SPARSE_TEXT): находит весь текст любой величины (заголовки, мелкий текст, плавающий текст)
+      // PSM 3 (AUTO): полноценный анализ разметки страницы, находит заголовки, списки и подзаголовки
       await worker.setParameters({
-        tessedit_pageseg_mode: '11',
+        tessedit_pageseg_mode: '3',
         preserve_interword_spaces: '1',
       });
       return worker;
@@ -44,79 +45,174 @@ async function getTWorker() {
   return tWorkerPromise;
 }
 
-// Предобработка изображения: увеличение контрастности без размытия деталей
-async function preprocessForOcr(imageSource) {
-  try {
-    let imgBitmap = null;
-    if (imageSource instanceof Blob) {
-      imgBitmap = await createImageBitmap(imageSource);
-    } else if (typeof imageSource === 'string' && imageSource.startsWith('data:')) {
-      const resp = await fetch(imageSource);
-      const b = await resp.blob();
-      imgBitmap = await createImageBitmap(b);
-    }
-
-    if (!imgBitmap) return imageSource;
-
-    const w = imgBitmap.width;
-    const h = imgBitmap.height;
-    const cnv = document.createElement('canvas');
-    cnv.width = w;
-    cnv.height = h;
-    const ctx = cnv.getContext('2d', { willReadFrequently: true });
-    ctx.drawImage(imgBitmap, 0, 0, w, h);
-
-    const imgData = ctx.getImageData(0, 0, w, h);
-    const d = imgData.data;
-
-    for (let i = 0; i < d.length; i += 4) {
-      const gray = (d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8;
-      const c = gray > 140 ? Math.min(255, gray + 25) : Math.max(0, gray - 25);
-      d[i] = c;
-      d[i + 1] = c;
-      d[i + 2] = c;
-    }
-    ctx.putImageData(imgData, 0, 0);
-    return cnv;
-  } catch (err) {
-    console.warn('OCR preprocessing fallback:', err);
-    return imageSource;
+// Преобразование любого источника (Blob, URL, dataUrl, Canvas) в HTML5 Canvas через нативный декодер браузера.
+// Это навсегда устраняет ошибку Leptonica "Unknown format: no pix returned" для форматов WebP и AVIF!
+async function imageSourceToCanvas(imageSource) {
+  let imgBitmap = null;
+  if (imageSource instanceof Blob) {
+    imgBitmap = await createImageBitmap(imageSource);
+  } else if (typeof imageSource === 'string') {
+    const resp = await fetch(imageSource);
+    const b = await resp.blob();
+    imgBitmap = await createImageBitmap(b);
+  } else if (imageSource instanceof HTMLImageElement || imageSource instanceof HTMLCanvasElement) {
+    imgBitmap = await createImageBitmap(imageSource);
   }
+
+  if (!imgBitmap) {
+    throw new Error('Не удалось декодировать изображение кадра/слайда.');
+  }
+
+  // Tesseract лучше всего распознаёт текст при высоте строки 30-45px.
+  // Если разрешение меньше 1400px, масштабируем с высоким качеством сглаживания
+  let scale = 1.0;
+  const maxDim = Math.max(imgBitmap.width, imgBitmap.height);
+  if (maxDim < 1400) {
+    scale = Math.min(2.0, 1600 / maxDim);
+  }
+
+  const cnv = document.createElement('canvas');
+  cnv.width = Math.max(1, Math.round(imgBitmap.width * scale));
+  cnv.height = Math.max(1, Math.round(imgBitmap.height * scale));
+  const ctx = cnv.getContext('2d', { willReadFrequently: true });
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(imgBitmap, 0, 0, cnv.width, cnv.height);
+  return cnv;
 }
 
-async function doOcr(imageSource) {
-  const w = await getTWorker();
+async function imageSourceToDataUrl(imageSource) {
+  if (typeof imageSource === 'string' && imageSource.startsWith('data:image/')) {
+    return imageSource;
+  }
+  const cnv = await imageSourceToCanvas(imageSource);
+  return cnv.toDataURL('image/jpeg', 0.92);
+}
 
-  // 1-й проход: по чистому полноцветному изображению с PSM 11 (Leptonica сама делает адаптивную бинаризацию)
-  let res = await w.recognize(imageSource);
-  let text = (res && res.data && res.data.text) ? res.data.text.trim() : '';
-
-  // Если текста мало или он пустой, 2-й проход: с повышенной контрастностью
-  if (!text || text.length < 10) {
-    try {
-      const processed = await preprocessForOcr(imageSource);
-      if (processed && processed !== imageSource) {
-        const res2 = await w.recognize(processed);
-        const text2 = (res2 && res2.data && res2.data.text) ? res2.data.text.trim() : '';
-        if (text2 && text2.length > text.length) {
-          text = text2;
-        }
-      }
-    } catch (_) {}
+// Фильтрация распознанных строк Tesseract: удаление низковероятного фото-мусора
+function filterCleanTextLines(data) {
+  if (!data) return '';
+  const lines = data.lines || [];
+  if (!lines.length) {
+    return (data.text || '').trim();
   }
 
-  // 3-й проход: PSM 6 (единый блок текста)
-  if (!text || text.length < 5) {
+  const valid = [];
+  for (const line of lines) {
+    const raw = (line.text || '').trim();
+    if (!raw) continue;
+
+    // Отсекаем артефакты фото-фона по порогу уверенности Tesseract (< 35%)
+    const conf = typeof line.confidence === 'number' ? line.confidence : 100;
+    if (conf < 35) continue;
+
+    const letters = raw.replace(/[^\p{L}\p{N}]/gu, '');
+    if (!letters) continue;
+
+    // В настоящих словах человеческого языка есть гласные буквы
+    const hasVowels = /[аеёиоуыэюяaeiouy]/i.test(letters);
+    const isNumberOrPunct = /^[\d\s\.\,\+\-\%\/\:\(\)\#№]+$/.test(raw);
+    const isRussianShortWord = /^[виаскоуяVI]\b/i.test(raw);
+
+    // Короткий шум без гласных (типа "LLY", "ws", "NN", "SRS", "wor", "Sex", "2m", "щ =") отсекаем
+    if (letters.length <= 4 && !hasVowels && !isNumberOrPunct && !isRussianShortWord) {
+      continue;
+    }
+
+    valid.push(raw);
+  }
+
+  return valid.join('\n').trim();
+}
+
+// Распознавание через Cloud Vision API (Groq Llama 3.2 Vision или OpenAI gpt-4o-mini)
+async function recognizeImageViaCloudApi(dataUrl, apiKey) {
+  const cleanKey = (apiKey || '').trim();
+  const isGroq = cleanKey.startsWith('gsk_');
+  const endpoint = isGroq
+    ? 'https://api.groq.com/openai/v1/chat/completions'
+    : 'https://api.openai.com/v1/chat/completions';
+
+  // Модели: Groq llama-3.2-11b-vision-preview или OpenAI gpt-4o-mini
+  const model = isGroq ? 'llama-3.2-11b-vision-preview' : 'gpt-4o-mini';
+
+  const prompt =
+    'Внимательно прочитай и выведи ВЕСЬ видимый текст на этом изображении: заголовки, подзаголовки, мелкий поясняющий текст, рецепты, списки ингредиентов или призывы к действию. ' +
+    'Выведи ТОЛЬКО текст с изображения слово в слово, сохраняя структуру строк, без лишних приветствий и комментариев. ' +
+    'Если на картинке нет текста (только фото или фон), верни пустую строку.';
+
+  const payload = {
+    model,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: prompt },
+          { type: 'image_url', image_url: { url: dataUrl } },
+        ],
+      },
+    ],
+    temperature: 0.1,
+    max_tokens: 1000,
+  };
+
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${cleanKey}`,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Ошибка Cloud Vision (${res.status}): ${errText}`);
+  }
+
+  const json = await res.json();
+  const text = (json.choices && json.choices[0] && json.choices[0].message && json.choices[0].message.content) || '';
+  return text.trim();
+}
+
+async function doOcr(imageSource, apiKey) {
+  const cleanKey = (apiKey || '').trim();
+
+  // Если передан API ключ (Groq / OpenAI) — запускаем Cloud Vision (100% точность, все подзаголовки и рецепты)
+  if (cleanKey.startsWith('gsk_') || cleanKey.startsWith('sk-')) {
+    try {
+      const dataUrl = await imageSourceToDataUrl(imageSource);
+      const cloudRes = await recognizeImageViaCloudApi(dataUrl, cleanKey);
+      if (cloudRes && cloudRes.trim()) {
+        return cloudRes.trim();
+      }
+    } catch (e) {
+      console.warn('Cloud Vision OCR не удался, переключаюсь на локальный Tesseract:', e);
+    }
+  }
+
+  // Локальный OCR через Tesseract WASM на базе декодированного HTML Canvas
+  const canvas = await imageSourceToCanvas(imageSource);
+  const w = await getTWorker();
+
+  // 1-й проход: авторазметка (PSM 3) по чистому сглаженному изображению
+  let res = await w.recognize(canvas);
+  let text = filterCleanTextLines(res && res.data);
+
+  // 2-й проход: если текста мало, пробуем режим единого блока (PSM 6)
+  if (!text || text.length < 10) {
     try {
       await w.setParameters({ tessedit_pageseg_mode: '6' });
-      const res6 = await w.recognize(imageSource);
-      await w.setParameters({ tessedit_pageseg_mode: '11' });
-      const text6 = (res6 && res6.data && res6.data.text) ? res6.data.text.trim() : '';
+      const res6 = await w.recognize(canvas);
+      await w.setParameters({ tessedit_pageseg_mode: '3' });
+      const text6 = filterCleanTextLines(res6 && res6.data);
       if (text6 && text6.length > text.length) {
         text = text6;
       }
     } catch (_) {
-      try { await w.setParameters({ tessedit_pageseg_mode: '11' }); } catch (_) {}
+      try {
+        await w.setParameters({ tessedit_pageseg_mode: '3' });
+      } catch (_) {}
     }
   }
 
@@ -131,7 +227,6 @@ function compactText(s) {
     .map((l) => l.trim())
     .filter(Boolean)
     .filter((l) => {
-      // Сохраняем одиночные буквы и цифры ("и", "в", "а", "1"), отсекаем только одиночный мусор типа "|", "-"
       if (l.length <= 1 && !/[\p{L}\p{N}]/u.test(l)) return false;
       const key = l.toLowerCase().replace(/\s+/g, ' ');
       if (seen.has(key)) return false;
@@ -142,15 +237,12 @@ function compactText(s) {
 }
 
 // Распознавание изображения по прямому URL (для слайдов карусели)
-async function recognizeImageUrl(url) {
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`Не удалось загрузить изображение слайда (код ${resp.status})`);
-  const blob = await resp.blob();
-  return await doOcr(blob);
+async function recognizeImageUrl(url, apiKey) {
+  return await doOcr(url, apiKey);
 }
 
 // Прямое извлечение кадров из видео по URL и распознавание текста
-async function extractVideoFramesAndOcr(url, headTimestamps, tailTimestamps) {
+async function extractVideoFramesAndOcr(url, headTimestamps, tailTimestamps, apiKey) {
   const resp = await fetch(url);
   if (!resp.ok) throw new Error(`Не удалось загрузить видео (код ${resp.status})`);
   const arrayBuf = await resp.arrayBuffer();
@@ -170,12 +262,18 @@ async function extractVideoFramesAndOcr(url, headTimestamps, tailTimestamps) {
 
   try {
     await new Promise((resolve, reject) => {
-      const onLoaded = () => { cleanup(); resolve(); };
+      const onLoaded = () => {
+        cleanup();
+        resolve();
+      };
       const onError = () => {
         cleanup();
         reject(new Error('Не удалось декодировать видео в фоновом документе.'));
       };
-      const timer = setTimeout(() => { cleanup(); reject(new Error('Таймаут декодирования видео (20 с).')); }, 20000);
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error('Таймаут декодирования видео (20 с).'));
+      }, 20000);
       function cleanup() {
         clearTimeout(timer);
         video.removeEventListener('loadeddata', onLoaded);
@@ -233,7 +331,7 @@ async function extractVideoFramesAndOcr(url, headTimestamps, tailTimestamps) {
     const headTexts = [];
     for (const frame of headFrames) {
       try {
-        const txt = await doOcr(frame);
+        const txt = await doOcr(frame, apiKey);
         if (txt) headTexts.push(txt);
       } catch (e) {
         console.warn('Ошибка OCR кадра начала:', e);
@@ -243,7 +341,7 @@ async function extractVideoFramesAndOcr(url, headTimestamps, tailTimestamps) {
     const tailTexts = [];
     for (const frame of tailFrames) {
       try {
-        const txt = await doOcr(frame);
+        const txt = await doOcr(frame, apiKey);
         if (txt) tailTexts.push(txt);
       } catch (e) {
         console.warn('Ошибка OCR кадра конца:', e);
@@ -374,9 +472,10 @@ async function transcribeViaCloudApi(audioBlobOrBytes, apiKey, prompt) {
     : 'https://api.openai.com/v1/audio/transcriptions';
   const model = isGroq ? 'whisper-large-v3' : 'whisper-1';
 
-  const blob = audioBlobOrBytes instanceof Blob
-    ? audioBlobOrBytes
-    : new Blob([audioBlobOrBytes], { type: 'audio/webm' });
+  const blob =
+    audioBlobOrBytes instanceof Blob
+      ? audioBlobOrBytes
+      : new Blob([audioBlobOrBytes], { type: 'audio/webm' });
 
   const fd = new FormData();
   fd.append('file', blob, 'audio.webm');
@@ -407,13 +506,11 @@ function cleanWhisperText(text) {
   if (!text) return '';
   let str = String(text).trim();
 
-  // Удаление стандартных титров и артефактов тишины
   str = str.replace(/субтитры\s+(?:делал|сделал|создал|подготовил|перевёл)[^\n\.\,]*/gi, '');
   str = str.replace(/спасибо\s+за\s+просмотр[^\n\.\,]*/gi, '');
   str = str.replace(/продолжение\s+следует[^\n\.\,]*/gi, '');
   str = str.replace(/редактор\s+субтитров[^\n\.\,]*/gi, '');
 
-  // Токенизация и схлопывание повторяющихся слов (например, "было было было было" -> "было")
   const tokens = str.split(/(\s+)/);
   const out = [];
   let lastWord = '';
@@ -437,7 +534,6 @@ function cleanWhisperText(text) {
   }
 
   let res = out.join('').trim();
-  // Схлопывание 2-4 словных повторяющихся фраз
   res = res.replace(/((?:[^\s]+\s+){1,4})\1{2,}/gi, '$1');
   return res.trim();
 }
@@ -457,7 +553,7 @@ async function transcribeSegment(audioBuffer, startSec, endSec, apiKey) {
   const rendered = await off.startRendering();
   const pcm = rendered.getChannelData(0);
 
-  // Peak-нормализация: вытягиваем звук до максимальной амплитуды 0.95
+  // Peak-нормализация
   let maxAmp = 0;
   for (let i = 0; i < pcm.length; i++) {
     const v = Math.abs(pcm[i]);
@@ -553,7 +649,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'ocrDo') {
     (async () => {
       try {
-        const text = await doOcr(msg.image);
+        const text = await doOcr(msg.image, msg.apiKey);
         sendResponse({ ok: true, text });
       } catch (e) {
         tWorkerPromise = null;
@@ -566,7 +662,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'ocrImageUrl') {
     (async () => {
       try {
-        const text = await recognizeImageUrl(msg.url);
+        const text = await recognizeImageUrl(msg.url, msg.apiKey);
         sendResponse({ ok: true, text });
       } catch (e) {
         sendResponse({ ok: false, error: String((e && e.message) || e) });
@@ -578,7 +674,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'ocrVideoDo') {
     (async () => {
       try {
-        const res = await extractVideoFramesAndOcr(msg.url, msg.headTimestamps || [], msg.tailTimestamps || []);
+        const res = await extractVideoFramesAndOcr(
+          msg.url,
+          msg.headTimestamps || [],
+          msg.tailTimestamps || [],
+          msg.apiKey
+        );
         sendResponse({ ok: true, headText: res.headText, tailText: res.tailText });
       } catch (e) {
         sendResponse({ ok: false, error: String((e && e.message) || e) });

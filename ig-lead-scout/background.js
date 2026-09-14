@@ -190,14 +190,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     msg.type === 'asrRecognizeUrl'
   ) {
     let payload;
-    if (msg.type === 'ocrRecognize') payload = { type: 'ocrDo', image: msg.image };
-    else if (msg.type === 'ocrRecognizeUrl') payload = { type: 'ocrImageUrl', url: msg.url };
+    if (msg.type === 'ocrRecognize') payload = { type: 'ocrDo', image: msg.image, apiKey: msg.apiKey };
+    else if (msg.type === 'ocrRecognizeUrl') payload = { type: 'ocrImageUrl', url: msg.url, apiKey: msg.apiKey };
     else if (msg.type === 'ocrVideoDirect')
       payload = {
         type: 'ocrVideoDo',
         url: msg.url,
         headTimestamps: msg.headTimestamps,
         tailTimestamps: msg.tailTimestamps,
+        apiKey: msg.apiKey,
       };
     else if (msg.type === 'asrRecognize') payload = { type: 'asrDo', audio: msg.audio, apiKey: msg.apiKey };
     else

@@ -16,6 +16,7 @@
     "activeTab"
   ],
   "host_permissions": [
+    "<all_urls>",
     "https://*.cdninstagram.com/*",
     "https://*.fbcdn.net/*",
     "https://*.hf-mirror.com/*",
