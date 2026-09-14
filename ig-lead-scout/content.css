@@ -635,8 +635,13 @@
   position: fixed;
   z-index: 2147483647;
   display: none;
+  flex-direction: column;
+  top: 70px;
+  right: 24px;
   width: 350px;
   max-width: calc(100vw - 20px);
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
   box-sizing: border-box !important;
   padding: 14px 16px;
   background: #0f141a;

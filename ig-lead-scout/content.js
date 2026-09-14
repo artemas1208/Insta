@@ -1420,7 +1420,7 @@
       if (r.width <= 0 || r.height <= 0) return false;
       const cx = r.left + r.width / 2;
       const cy = r.top + r.height / 2;
-      return cx >= mRect.left && cx <= mRect.right + 15 && cy >= mRect.top && cy <= mRect.bottom;
+      return cx >= mRect.left - 30 && cx <= mRect.right + 40 && cy >= mRect.top - 30 && cy <= mRect.bottom + 30;
     };
 
     const selectors = [
@@ -1488,7 +1488,7 @@
       if (r.width <= 0 || r.height <= 0) return false;
       const cx = r.left + r.width / 2;
       const cy = r.top + r.height / 2;
-      return cx >= mRect.left - 15 && cx <= mRect.right && cy >= mRect.top && cy <= mRect.bottom;
+      return cx >= mRect.left - 40 && cx <= mRect.right + 30 && cy >= mRect.top - 30 && cy <= mRect.bottom + 30;
     };
 
     const selectors = [
@@ -2034,17 +2034,28 @@
     return isNaN(n) || n < 1 ? fallback : Math.min(n, 60);
   }
 
-  async function openOcrModal(initialType) {
+  async function openOcrModal(anchorOrType) {
     const pop = ensureOcrPopup();
     pop.style.display = 'flex';
 
     chrome.storage.local.get(['igx_ocr_pos']).then((d) => {
       if (d && d.igx_ocr_pos && d.igx_ocr_pos.left && d.igx_ocr_pos.top) {
-        pop.style.left = d.igx_ocr_pos.left;
-        pop.style.top = d.igx_ocr_pos.top;
-        pop.style.right = 'auto';
-        pop.style.bottom = 'auto';
+        const leftVal = parseInt(d.igx_ocr_pos.left, 10);
+        const topVal = parseInt(d.igx_ocr_pos.top, 10);
+        if (!isNaN(leftVal) && !isNaN(topVal)) {
+          const clampedLeft = Math.max(10, Math.min(window.innerWidth - 360, leftVal));
+          const clampedTop = Math.max(10, Math.min(window.innerHeight - 300, topVal));
+          pop.style.left = `${clampedLeft}px`;
+          pop.style.top = `${clampedTop}px`;
+          pop.style.right = 'auto';
+          pop.style.bottom = 'auto';
+          return;
+        }
       }
+      pop.style.top = '70px';
+      pop.style.right = '24px';
+      pop.style.left = 'auto';
+      pop.style.bottom = 'auto';
     });
 
     const statusEl = pop.querySelector('.igx-ocr-status');
@@ -2053,7 +2064,8 @@
     if (resWrap) resWrap.style.display = 'none';
 
     const media = detectCurrentPostMedia();
-    const type = initialType || (media && media.type) || 'video';
+    const explicitType = typeof anchorOrType === 'string' ? anchorOrType : null;
+    const type = explicitType || (media && media.type) || igxActiveMediaType || 'video';
 
     const tabVideo = pop.querySelector('.igx-tab-video');
     const tabSlides = pop.querySelector('.igx-tab-slides');
@@ -2062,6 +2074,10 @@
     } else {
       tabVideo.click();
     }
+  }
+
+  function openOcrPopup(anchorOrType) {
+    return openOcrModal(anchorOrType);
   }
 
   async function ocrRun() {
