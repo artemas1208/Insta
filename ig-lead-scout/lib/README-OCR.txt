@@ -1,18 +1,28 @@
-Файлы для распознавания текста (OCR) и речи (Whisper ASR) с видео:
+Файлы для распознавания текста (OCR) и речи (Whisper ASR) с видео и слайдов:
 
-1. Текст с экрана (OCR / Tesseract):
-   - tesseract.min.js                 — библиотека Tesseract.js
-   - worker.min.js                    — воркер Tesseract.js (версия 5.1.1)
-   - tesseract-core-simd-lstm.wasm.js — движок распознавания (WASM)
-   - rus.traineddata.gz               — словарь русского языка (~8 МБ)
+1. Текст с экрана / слайдов (OCR / Tesseract rus+eng):
+   - tesseract.min.js                 — библиотека Tesseract.js (версия 5.1.1)
+   - worker.min.js                    — воркер Tesseract.js
+   - tesseract-core-simd-lstm.wasm.js — движок распознавания (WASM SIMD)
+   - tesseract-core.wasm.js           — базовый движок распознавания (WASM)
+   - rus.traineddata.gz               — обученная модель русского языка (~8.6 МБ)
+   - eng.traineddata.gz               — обученная модель английского языка (~1.9 МБ)
 
 2. Речь из звука (ASR / Whisper):
-   - transformers.min.js              — библиотека Transformers.js
-   - ort-wasm-simd.wasm               — рантайм ONNX WebAssembly
+   - transformers.min.js              — библиотека Transformers.js (@xenova/transformers)
+   - ort-wasm-simd.wasm               — рантайм ONNX WebAssembly (Single-threaded SIMD, совместим с Chrome MV3 без COOP/COEP)
+   - ort-wasm.wasm                    — резервный рантайм ONNX WebAssembly (Single-threaded)
+   - Поддерживает автоматическую загрузку через Hugging Face и зеркало hf-mirror.com.
 
-Все эти файлы уже скачаны и находятся в папке lib/.
-При первом запуске «Речь из звука» модель Xenova/whisper-tiny (~40 МБ) автоматически загружается
-и кешируется в браузере (в последующие разы загрузка мгновенная).
+3. Извлечение текста со слайдов (каруселей):
+   - Автоматически определяет карусели в Инстаграме.
+   - Скачивает изображения слайдов напрямую (без CORS-блокировок и проблем tainted canvas).
+   - Если начало + конец > общего числа слайдов или длительности видео — делит ровно пополам (хук до середины, призыв после).
+
+4. Удобство интерфейса:
+   - Меню извлечения можно перетаскивать за шапку в любое место экрана.
+   - Поля ввода чисел в режиме слайдов аккуратно расположены в сетку и не вылезают за границы.
+   - Результат извлечения сразу отображается в поле предпросмотра с кнопкой «📋 Скопировать».
 
 После внесения изменений:
 1. Открой chrome://extensions в браузере.
