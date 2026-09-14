@@ -152,14 +152,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // Снимок вкладки для видео с CORS-защитой (когда canvas.toDataURL блокируется браузером)
   if (msg.type === 'captureTab') {
-    const winId = (sender.tab && sender.tab.windowId) != null ? sender.tab.windowId : null;
-    chrome.tabs.captureVisibleTab(winId, { format: 'jpeg', quality: 85 }, (dataUrl) => {
+    const targetWinId = (sender.tab && typeof sender.tab.windowId === 'number') ? sender.tab.windowId : undefined;
+    const captureCallback = (dataUrl) => {
       if (chrome.runtime.lastError || !dataUrl) {
         sendResponse({ ok: false, error: (chrome.runtime.lastError && chrome.runtime.lastError.message) || 'Не удалось сделать снимок вкладки.' });
       } else {
         sendResponse({ ok: true, dataUrl });
       }
-    });
+    };
+    if (typeof targetWinId === 'number') {
+      chrome.tabs.captureVisibleTab(targetWinId, { format: 'jpeg', quality: 85 }, captureCallback);
+    } else {
+      chrome.tabs.captureVisibleTab({ format: 'jpeg', quality: 85 }, captureCallback);
+    }
     return true;
   }
 

@@ -1167,10 +1167,10 @@
         resolved = true;
         video.removeEventListener('seeked', onSeeked);
         clearTimeout(timer);
-        setTimeout(resolve, 100);
+        setTimeout(resolve, 200);
       };
       const onSeeked = () => done();
-      const timer = setTimeout(done, 500);
+      const timer = setTimeout(done, 600);
       video.addEventListener('seeked', onSeeked, { once: true });
       try {
         const target = Math.min(Math.max(0.02, (video.duration || 10) - 0.05), Math.max(0.02, t));
@@ -1181,25 +1181,20 @@
     });
   }
 
+  function getRangeTimestamps(from, to, isHead) {
+    const dur = Math.max(0.2, to - from);
+    const count = Math.min(5, Math.max(3, Math.floor(dur / 2.0)));
+    const step = dur / (count + 1);
+    const timestamps = [];
+    for (let i = 1; i <= count; i++) {
+      timestamps.push(Math.round((from + step * i) * 10) / 10);
+    }
+    return Array.from(new Set(timestamps));
+  }
+
   async function captureRange(video, from, to, isHead, statusEl, label) {
     const frames = [];
-    let timestamps = [];
-    const dur = Math.max(0.2, to - from);
-
-    if (isHead) {
-      timestamps = [0.05, 0.6, Math.min(to, 1.5)];
-      if (to > 2.2) timestamps.push(Math.min(to, 2.5));
-      if (to > 4.0) timestamps.push(Math.max(1.0, to - 0.4));
-    } else {
-      timestamps = [
-        from + Math.min(0.4, dur * 0.15),
-        from + dur * 0.45,
-        from + dur * 0.75,
-        Math.max(from, to - 0.2),
-      ];
-    }
-
-    timestamps = Array.from(new Set(timestamps.map((t) => Math.round(t * 10) / 10)));
+    const timestamps = getRangeTimestamps(from, to, isHead);
 
     // Временно скрываем оверлей паузы Instagram поверх видео, чтобы он не закрывал субтитры
     const scope = video.closest('article, [role="dialog"], div._aatk') || document.body;
@@ -1689,26 +1684,36 @@
 
     const headTexts = [];
     for (const s of headSlides) {
-      if (statusEl) statusEl.textContent = `Распознаю слайд ${s} (хук)…`;
+      if (statusEl) statusEl.textContent = apiKey ? `Распознаю слайд ${s} (Vision AI)…` : `Распознаю слайд ${s}…`;
       try {
         const txt = await ocrItem(captured[s]);
         const clean = compactOcrText(txt);
-        if (clean) headTexts.push(`[Слайд ${s}]\n${clean}`);
+        if (clean) {
+          headTexts.push(`Слайд ${s}:\n${clean}`);
+        }
       } catch (e) {
         console.warn(`Ошибка OCR слайда ${s}:`, e);
       }
     }
+    if (headTexts.length === 0) {
+      headTexts.push(headSlides.length === 1 ? `Слайд ${headSlides[0]}:\n(нет текста)` : '(текст на слайдах не найден)');
+    }
 
     const tailTexts = [];
     for (const s of tailSlides) {
-      if (statusEl) statusEl.textContent = `Распознаю слайд ${s} (призыв)…`;
+      if (statusEl) statusEl.textContent = apiKey ? `Распознаю слайд ${s} (Vision AI)…` : `Распознаю слайд ${s}…`;
       try {
         const txt = await ocrItem(captured[s]);
         const clean = compactOcrText(txt);
-        if (clean) tailTexts.push(`[Слайд ${s}]\n${clean}`);
+        if (clean) {
+          tailTexts.push(`Слайд ${s}:\n${clean}`);
+        }
       } catch (e) {
         console.warn(`Ошибка OCR слайда ${s}:`, e);
       }
+    }
+    if (tailTexts.length === 0) {
+      tailTexts.push(tailSlides.length === 1 ? `Слайд ${tailSlides[0]}:\n(нет текста)` : '(текст на слайдах не найден)');
     }
 
     return {
@@ -1928,7 +1933,7 @@
       '<summary style="outline: none; user-select: none; font-weight: 600;">⚡ Ключ Groq API (бесплатно, точность 100% Premiere)</summary>' +
       '<div style="margin-top: 6px; display: flex; flex-direction: column; gap: 4px;">' +
       '<input type="password" class="igx-ocr-apikey-input" placeholder="gsk_... (бесплатно на console.groq.com) или sk-..." style="width: 100%; box-sizing: border-box; padding: 6px 8px; font-size: 11px; background: #1a2129; border: 1px solid #37424f; border-radius: 6px; color: #e7edf3;" />' +
-      '<span style="font-size: 10px; color: #64748b; line-height: 1.3;">Идеально читает речь (Whisper Large v3) и текст со слайдов/видео (Llama 3.2 Vision). Если пусто — работает локально в браузере.</span>' +
+      '<span style="font-size: 10px; color: #64748b; line-height: 1.3;">Распознаёт речь через Whisper Large v3 и текст на слайдах/видео через Vision AI (Qwen 3.6 / GPT-4o). Если пусто — работает локально.</span>' +
       '</div>' +
       '</details>' +
       '<button class="igx-btn igx-ocr-run">📝 Извлечь и скопировать</button>' +
@@ -2109,16 +2114,7 @@
           statusEl
         );
 
-        const headLabel =
-          headSlides.length > 1
-            ? `слайды ${headSlides[0]}–${headSlides[headSlides.length - 1]}`
-            : `слайд ${headSlides[0] || 1}`;
-        const tailLabel =
-          tailSlides.length > 1
-            ? `слайды ${tailSlides[0]}–${tailSlides[tailSlides.length - 1]}`
-            : `слайд ${tailSlides[0] || 1}`;
-
-        const result = `Хук (${headLabel}):\n${headText || '(текст на слайдах не найден)'}\n\nПризыв (${tailLabel}):\n${tailText || '(текст на слайдах не найден)'}`;
+        const result = `Хук:\n${headText}\n\nПризыв:\n${tailText}`;
 
         if (resText && resWrap) {
           resText.value = result;
@@ -2193,10 +2189,29 @@
         }
       } else {
         // Текст с экрана (OCR кадров)
-        const headFrames = await captureRange(video, 0, headTo, true, statusEl, 'начала');
-        const tailFrames = await captureRange(video, tailFrom, tailTo, false, statusEl, 'конца');
-        headText = compactOcrText(await ocrFrames(headFrames, apiKey, statusEl, 'хука'));
-        tailText = compactOcrText(await ocrFrames(tailFrames, apiKey, statusEl, 'призыва'));
+        let directSuccess = false;
+        if (directUrl) {
+          try {
+            statusEl.textContent = apiKey ? 'Распознаю текст на видео (Vision AI)…' : 'Распознаю текст на видео…';
+            const headTimestamps = getRangeTimestamps(0, headTo, true);
+            const tailTimestamps = getRangeTimestamps(tailFrom, tailTo, false);
+            const res = await ocrVideoDirect(directUrl, headTimestamps, tailTimestamps, apiKey);
+            if (res && (res.headText || res.tailText)) {
+              headText = res.headText;
+              tailText = res.tailText;
+              directSuccess = true;
+            }
+          } catch (e) {
+            console.warn('ocrVideoDirect не удался, пробуем захват с экрана:', e);
+          }
+        }
+
+        if (!directSuccess) {
+          const headFrames = await captureRange(video, 0, headTo, true, statusEl, 'начала');
+          const tailFrames = await captureRange(video, tailFrom, tailTo, false, statusEl, 'конца');
+          headText = compactOcrText(await ocrFrames(headFrames, apiKey, statusEl, 'хука'));
+          tailText = compactOcrText(await ocrFrames(tailFrames, apiKey, statusEl, 'призыва'));
+        }
 
         // Если OCR не нашёл текст на кадрах, проверяем встроенные DOM-субтитры Instagram
         if (!headText) {

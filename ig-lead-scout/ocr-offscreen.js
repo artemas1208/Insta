@@ -102,30 +102,46 @@ function filterCleanTextLines(data) {
     const raw = (line.text || '').trim();
     if (!raw) continue;
 
-    // Отсекаем артефакты фото-фона по порогу уверенности Tesseract (< 35%)
-    const conf = typeof line.confidence === 'number' ? line.confidence : 100;
-    if (conf < 35) continue;
+    // Считаем уверенность строки по словам
+    let avgConf = 0;
+    if (line.words && line.words.length > 0) {
+      const sum = line.words.reduce((acc, w) => acc + (w.confidence || 0), 0);
+      avgConf = sum / line.words.length;
+    } else if (typeof line.confidence === 'number') {
+      avgConf = line.confidence;
+    } else {
+      avgConf = 70;
+    }
+
+    if (avgConf < 45) continue;
 
     const letters = raw.replace(/[^\p{L}\p{N}]/gu, '');
-    if (!letters) continue;
+    if (letters.length < 2) continue;
 
     // В настоящих словах человеческого языка есть гласные буквы
     const hasVowels = /[аеёиоуыэюяaeiouy]/i.test(letters);
-    const isNumberOrPunct = /^[\d\s\.\,\+\-\%\/\:\(\)\#№]+$/.test(raw);
-    const isRussianShortWord = /^[виаскоуяVI]\b/i.test(raw);
+    if (!hasVowels && letters.length <= 5 && !/^\d+$/.test(letters)) {
+      continue;
+    }
 
-    // Короткий шум без гласных (типа "LLY", "ws", "NN", "SRS", "wor", "Sex", "2m", "щ =") отсекаем
-    if (letters.length <= 4 && !hasVowels && !isNumberOrPunct && !isRussianShortWord) {
+    // Короткий шум без гласных или случайные обрывки (типа "LLY", "ws", "NN", "SRS", "wor", "Sex", "2m", "щ =") отсекаем
+    if (letters.length <= 3 && !/^[а-яёА-ЯЁ]{2,3}$/.test(letters)) {
       continue;
     }
 
     valid.push(raw);
   }
 
+  // Если после фильтрации осталось меньше 8 букв суммарно — на фото текста нет
+  const totalLetters = valid.join('').replace(/[^\p{L}]/gu, '');
+  if (totalLetters.length < 8) {
+    return '';
+  }
+
   return valid.join('\n').trim();
 }
 
-// Распознавание через Cloud Vision API (Groq Llama 3.2 Vision или OpenAI gpt-4o-mini)
+// Распознавание через Cloud Vision API (Groq Qwen 3.6/3.8 Vision или OpenAI gpt-4o-mini)
 async function recognizeImageViaCloudApi(dataUrl, apiKey) {
   const cleanKey = (apiKey || '').trim();
   const isGroq = cleanKey.startsWith('gsk_');
@@ -133,62 +149,84 @@ async function recognizeImageViaCloudApi(dataUrl, apiKey) {
     ? 'https://api.groq.com/openai/v1/chat/completions'
     : 'https://api.openai.com/v1/chat/completions';
 
-  // Модели: Groq llama-3.2-11b-vision-preview или OpenAI gpt-4o-mini
-  const model = isGroq ? 'llama-3.2-11b-vision-preview' : 'gpt-4o-mini';
+  // Для Groq: новейшие мультимодальные модели с аппаратным OCR
+  // Для OpenAI: gpt-4o-mini с фолбэком на gpt-4o
+  const models = isGroq
+    ? ['qwen/qwen3.6-27b', 'qwen/qwen3.8-27b']
+    : ['gpt-4o-mini', 'gpt-4o'];
 
   const prompt =
-    'Внимательно прочитай и выведи ВЕСЬ видимый текст на этом изображении: заголовки, подзаголовки, мелкий поясняющий текст, рецепты, списки ингредиентов или призывы к действию. ' +
-    'Выведи ТОЛЬКО текст с изображения слово в слово, сохраняя структуру строк, без лишних приветствий и комментариев. ' +
-    'Если на картинке нет текста (только фото или фон), верни пустую строку.';
+    'Внимательно прочитай изображение и выведи ВЕСЬ видимый текст на русском или английском языке (заголовки, подзаголовки, мелкий поясняющий текст, рецепты, граммовки, цитаты, призывы, надписи на видео). ' +
+    'Выведи ТОЛЬКО найденный на картинке текст слово в слово, сохраняя структуру строк. ' +
+    'Не пиши ничего от себя, не добавляй комментариев и рассуждений. ' +
+    'Если на изображении нет связного текста (только фотография человека, зал, пейзаж без надписей), ответь строго: (нет текста)';
 
-  const payload = {
-    model,
-    messages: [
-      {
-        role: 'user',
-        content: [
-          { type: 'text', text: prompt },
-          { type: 'image_url', image_url: { url: dataUrl } },
+  let lastError = null;
+  for (const model of models) {
+    try {
+      const payload = {
+        model,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: prompt },
+              { type: 'image_url', image_url: { url: dataUrl } },
+            ],
+          },
         ],
-      },
-    ],
-    temperature: 0.1,
-    max_tokens: 1000,
-  };
+        temperature: 0.1,
+        max_completion_tokens: 1024,
+      };
 
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${cleanKey}`,
-    },
-    body: JSON.stringify(payload),
-  });
+      if (isGroq) {
+        payload.reasoning_format = 'hidden';
+      }
 
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Ошибка Cloud Vision (${res.status}): ${errText}`);
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${cleanKey}`,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        lastError = new Error(`Ошибка Cloud Vision (${model}, ${res.status}): ${errText}`);
+        if (res.status === 400 || res.status === 404 || res.status === 429) {
+          continue;
+        }
+        throw lastError;
+      }
+
+      const json = await res.json();
+      let text =
+        (json.choices && json.choices[0] && json.choices[0].message && json.choices[0].message.content) || '';
+      // Очищаем reasoning теги, если модель вернула их в raw виде
+      text = text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+
+      if (/^\s*\(нет текста\)\s*$/i.test(text) || text.toLowerCase() === '(нет текста)') {
+        return '';
+      }
+      return text.trim();
+    } catch (err) {
+      lastError = err;
+    }
   }
 
-  const json = await res.json();
-  const text = (json.choices && json.choices[0] && json.choices[0].message && json.choices[0].message.content) || '';
-  return text.trim();
+  throw lastError || new Error('Все модели Cloud Vision вернули ошибку.');
 }
 
 async function doOcr(imageSource, apiKey) {
   const cleanKey = (apiKey || '').trim();
 
-  // Если передан API ключ (Groq / OpenAI) — запускаем Cloud Vision (100% точность, все подзаголовки и рецепты)
+  // Если передан API ключ (Groq / OpenAI) — запускаем Cloud Vision AI (100% точность)
   if (cleanKey.startsWith('gsk_') || cleanKey.startsWith('sk-')) {
-    try {
-      const dataUrl = await imageSourceToDataUrl(imageSource);
-      const cloudRes = await recognizeImageViaCloudApi(dataUrl, cleanKey);
-      if (cloudRes && cloudRes.trim()) {
-        return cloudRes.trim();
-      }
-    } catch (e) {
-      console.warn('Cloud Vision OCR не удался, переключаюсь на локальный Tesseract:', e);
-    }
+    const dataUrl = await imageSourceToDataUrl(imageSource);
+    const cloudRes = await recognizeImageViaCloudApi(dataUrl, cleanKey);
+    return (cloudRes || '').trim();
   }
 
   // Локальный OCR через Tesseract WASM на базе декодированного HTML Canvas
