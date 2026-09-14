@@ -614,22 +614,41 @@
   user-select: none;
 }
 .igx-seek-ocr {
-  display: none;
+  background: none;
+  border: none;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 0 4px;
+  margin-left: 6px;
+  opacity: 0.85;
+  transition: opacity 0.15s, transform 0.15s;
+  color: #fff;
+  line-height: 1;
+}
+.igx-seek-ocr:hover {
+  opacity: 1;
+  transform: scale(1.18);
 }
 
-/* Попап извлечения текста из видео */
+/* Попап извлечения текста из видео и слайдов */
 .igx-ocr-pop {
   position: fixed;
   z-index: 2147483647;
   display: none;
-  width: 300px;
+  width: 340px;
+  max-width: calc(100vw - 16px);
+  box-sizing: border-box !important;
   padding: 12px;
   background: #101418;
   border: 1px solid #2c3440;
   border-radius: 12px;
   box-shadow: 0 10px 34px rgba(0, 0, 0, 0.65);
-  font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
   color: #e7edf3;
+  touch-action: none;
+}
+.igx-ocr-pop * {
+  box-sizing: border-box !important;
 }
 .igx-ocr-head {
   display: flex;
@@ -639,6 +658,11 @@
   font-size: 13px;
   font-weight: 700;
   margin-bottom: 10px;
+  cursor: grab;
+  user-select: none;
+}
+.igx-ocr-pop.is-dragging .igx-ocr-head {
+  cursor: grabbing;
 }
 .igx-ocr-close {
   background: none;
@@ -651,31 +675,95 @@
 .igx-ocr-close:hover {
   color: #fff;
 }
-.igx-ocr-row {
+.igx-ocr-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.igx-ocr-tab {
+  flex: 1;
+  padding: 6px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  background: #1a2129;
+  border: 1px solid #37424f;
+  border-radius: 6px;
+  color: #8fa3b8;
+  cursor: pointer;
+  text-align: center;
+  transition: all 0.15s;
+}
+.igx-ocr-tab:hover {
+  background: #252e39;
+  color: #e7edf3;
+}
+.igx-ocr-tab.active {
+  background: #38bdf8;
+  color: #06202e;
+  border-color: #38bdf8;
+}
+.igx-ocr-inputs {
+  display: flex !important;
+  flex-direction: row !important;
+  gap: 10px !important;
+  width: 100% !important;
+  margin-bottom: 10px !important;
+}
+.igx-ocr-inputs label {
+  flex: 1 1 0 !important;
+  width: 0 !important;
+  min-width: 0 !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 4px !important;
+  font-size: 11px !important;
+  color: #aebbc9 !important;
+}
+.igx-ocr-inputs label span {
+  font-size: 11px !important;
+  font-weight: 500 !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  display: block !important;
+}
+.igx-ocr-inputs input {
+  width: 100% !important;
+  min-width: 0 !important;
+  padding: 6px 8px !important;
+  font-size: 13px !important;
+  color: #e7edf3 !important;
+  background: #1a2129 !important;
+  border: 1px solid #37424f !important;
+  border-radius: 6px !important;
+  outline: none !important;
+}
+.igx-ocr-inputs input:focus {
+  border-color: #38bdf8 !important;
+}
+.igx-ocr-modes {
   display: flex;
   gap: 12px;
   margin-bottom: 10px;
   font-size: 12px;
   color: #aebbc9;
 }
-.igx-ocr-row label {
+.igx-ocr-modes label {
   display: flex;
   align-items: center;
   gap: 6px;
   white-space: nowrap;
+  cursor: pointer;
 }
-.igx-ocr-row input {
-  width: 52px;
-  padding: 4px 6px;
-  font-size: 13px;
-  color: #e7edf3;
-  background: #1a2129;
-  border: 1px solid #37424f;
+.igx-ocr-badge {
+  font-size: 11px;
+  color: #38bdf8;
+  background: rgba(56, 189, 248, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.3);
   border-radius: 6px;
-  outline: none;
-}
-.igx-ocr-row input:focus {
-  border-color: #38bdf8;
+  padding: 5px 8px;
+  text-align: center;
+  margin-bottom: 10px;
 }
 .igx-ocr-run {
   width: 100%;
@@ -701,19 +789,56 @@
   color: #8fa3b8;
   min-height: 16px;
   line-height: 1.35;
+  user-select: text;
 }
-.igx-ocr-modes {
-  margin-bottom: 10px;
+.igx-ocr-result-wrap {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #2c3440;
+  user-select: text;
 }
-.igx-ocr-modes label {
+.igx-ocr-result-head {
   display: flex;
+  justify-content: space-between;
   align-items: center;
-  gap: 6px;
-  white-space: nowrap;
-  cursor: pointer;
+  margin-bottom: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #aebbc9;
 }
-
-/* Кнопка извлечения текста/звука в основной панели */
+.igx-ocr-copy-btn {
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #06202e;
+  background: #38bdf8;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.igx-ocr-copy-btn:hover {
+  background: #63cdfb;
+}
+.igx-ocr-result-text {
+  width: 100%;
+  box-sizing: border-box;
+  height: 90px;
+  padding: 6px 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  font-family: inherit;
+  color: #e7edf3;
+  background: #161c23;
+  border: 1px solid #37424f;
+  border-radius: 6px;
+  resize: vertical;
+  outline: none;
+  user-select: text;
+}
+.igx-ocr-result-text:focus {
+  border-color: #38bdf8;
+}
 .igx-btn-ocr {
   width: 100%;
   margin-top: 8px;
@@ -730,6 +855,3 @@
   background: #2e3d4c;
   border-color: #38bdf8;
 }
-
-
-

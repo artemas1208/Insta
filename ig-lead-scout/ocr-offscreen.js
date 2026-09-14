@@ -1,8 +1,8 @@
-// ocr-offscreen.js — распознавание текста (Tesseract) и речи (Whisper/transformers.js)
+// ocr-offscreen.js — распознавание текста (Tesseract rus+eng) и речи (Whisper)
 // в offscreen-документе расширения. Сюда приходят сообщения из background.js.
 // Файлы движков лежат в lib/ (см. lib/README-OCR.txt).
 
-// ---------- OCR: текст с кадров (Tesseract) ----------
+// ---------- OCR: текст с кадров (Tesseract rus+eng) ----------
 let tWorkerPromise = null;
 
 function getTWorker() {
@@ -11,18 +11,176 @@ function getTWorker() {
       if (typeof Tesseract === 'undefined') {
         throw new Error('Нет файла lib/tesseract.min.js — проверь наличие файлов в папке lib/.');
       }
-      return Tesseract.createWorker('rus', 1, {
-        workerPath: chrome.runtime.getURL('lib/worker.min.js'),
-        corePath: chrome.runtime.getURL('lib/'),
-        langPath: chrome.runtime.getURL('lib/'),
-        workerBlobURL: false, // без blob — CSP расширения разрешает только свои скрипты
-      });
-    })();
+      try {
+        return await Tesseract.createWorker(['rus', 'eng'], 1, {
+          workerPath: chrome.runtime.getURL('lib/worker.min.js'),
+          corePath: chrome.runtime.getURL('lib/'),
+          langPath: chrome.runtime.getURL('lib/'),
+          workerBlobURL: false, // без blob — CSP расширения разрешает только свои скрипты
+        });
+      } catch (err) {
+        console.warn('Не удалось загрузить rus+eng, откатываемся на rus:', err);
+        return await Tesseract.createWorker('rus', 1, {
+          workerPath: chrome.runtime.getURL('lib/worker.min.js'),
+          corePath: chrome.runtime.getURL('lib/'),
+          langPath: chrome.runtime.getURL('lib/'),
+          workerBlobURL: false,
+        });
+      }
+    })().catch((err) => {
+      tWorkerPromise = null;
+      throw err;
+    });
   }
   return tWorkerPromise;
 }
 
-// ---------- ASR: речь из звука (whisper-tiny, русский) ----------
+async function doOcr(imageSource) {
+  const w = await getTWorker();
+  const res = await w.recognize(imageSource);
+  return (res && res.data && res.data.text) ? res.data.text.trim() : '';
+}
+
+function compactText(s) {
+  const seen = new Set();
+  return String(s || '')
+    .split(/\n+/)
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .filter((l) => {
+      if (l.length <= 1 && !/\d/.test(l)) return false;
+      const key = l.toLowerCase().replace(/\s+/g, " ");
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .join('\n');
+}
+
+// Распознавание изображения по прямому URL (для слайдов карусели)
+async function recognizeImageUrl(url) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`Не удалось загрузить изображение слайда (код ${resp.status})`);
+  const blob = await resp.blob();
+  return await doOcr(blob);
+}
+
+// Прямое извлечение кадров из видео по URL и распознавание текста
+async function extractVideoFramesAndOcr(url, headTimestamps, tailTimestamps) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`Не удалось загрузить видео (код ${resp.status})`);
+  const arrayBuf = await resp.arrayBuffer();
+  const blob = new Blob([arrayBuf], { type: 'video/mp4' });
+  const blobUrl = URL.createObjectURL(blob);
+
+  const video = document.createElement('video');
+  video.src = blobUrl;
+  video.muted = true;
+  video.playsInline = true;
+  video.style.position = 'fixed';
+  video.style.left = '-9999px';
+  video.style.top = '-9999px';
+  video.style.width = '640px';
+  video.style.height = '360px';
+  document.body.appendChild(video);
+
+  try {
+    await new Promise((resolve, reject) => {
+      const onLoaded = () => { cleanup(); resolve(); };
+      const onError = () => {
+        cleanup();
+        reject(new Error('Не удалось декодировать видео в фоновом документе.'));
+      };
+      const timer = setTimeout(() => { cleanup(); reject(new Error('Таймаут декодирования видео (20 с).')); }, 20000);
+      function cleanup() {
+        clearTimeout(timer);
+        video.removeEventListener('loadeddata', onLoaded);
+        video.removeEventListener('error', onError);
+      }
+      video.addEventListener('loadeddata', onLoaded);
+      video.addEventListener('error', onError);
+    });
+
+    const w = video.videoWidth || 720;
+    const h = video.videoHeight || 1280;
+    const scale = Math.min(1.5, 1280 / Math.max(w, h));
+    const cnv = document.createElement('canvas');
+    cnv.width = Math.max(1, Math.round(w * scale));
+    cnv.height = Math.max(1, Math.round(h * scale));
+    const ctx = cnv.getContext('2d', { willReadFrequently: true });
+
+    async function captureFrameAt(t) {
+      return new Promise((resolve) => {
+        let done = false;
+        const fin = () => {
+          if (done) return;
+          done = true;
+          video.removeEventListener('seeked', fin);
+          clearTimeout(to);
+          try {
+            ctx.drawImage(video, 0, 0, cnv.width, cnv.height);
+            resolve(cnv.toDataURL('image/jpeg', 0.92));
+          } catch (e) {
+            resolve(null);
+          }
+        };
+        const to = setTimeout(fin, 1200);
+        video.addEventListener('seeked', fin);
+        try {
+          video.currentTime = Math.min(Math.max(0.01, (video.duration || 10) - 0.05), Math.max(0.01, t));
+        } catch (_) {
+          fin();
+        }
+      });
+    }
+
+    const headFrames = [];
+    for (const t of headTimestamps) {
+      const f = await captureFrameAt(t);
+      if (f) headFrames.push(f);
+    }
+
+    const tailFrames = [];
+    for (const t of tailTimestamps) {
+      const f = await captureFrameAt(t);
+      if (f) tailFrames.push(f);
+    }
+
+    const headTexts = [];
+    for (const frame of headFrames) {
+      try {
+        const txt = await doOcr(frame);
+        if (txt) headTexts.push(txt);
+      } catch (e) {
+        console.warn('Ошибка OCR кадра начала:', e);
+      }
+    }
+
+    const tailTexts = [];
+    for (const frame of tailFrames) {
+      try {
+        const txt = await doOcr(frame);
+        if (txt) tailTexts.push(txt);
+      } catch (e) {
+        console.warn('Ошибка OCR кадра конца:', e);
+      }
+    }
+
+    return {
+      headText: compactText(headTexts.join('\n')),
+      tailText: compactText(tailTexts.join('\n')),
+    };
+  } finally {
+    try {
+      video.pause();
+      video.src = '';
+      video.remove();
+    } catch (_) {}
+    URL.revokeObjectURL(blobUrl);
+  }
+}
+
+// ---------- ASR: речь из звука (Whisper) ----------
 let asrPipe = null;
 
 async function getAsrPipe() {
@@ -36,16 +194,52 @@ async function getAsrPipe() {
 
   const env = transformers.env;
   env.allowLocalModels = false;
+  env.allowRemoteModels = true;
+  env.useBrowserCache = true;
+
   if (env.backends && env.backends.onnx && env.backends.onnx.wasm) {
     env.backends.onnx.wasm.proxy = false;
     env.backends.onnx.wasm.numThreads = 1;
     env.backends.onnx.wasm.wasmPaths = chrome.runtime.getURL('lib/');
   }
 
-  asrPipe = await transformers.pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny', {
-    dtype: 'q8',
-  });
-  return asrPipe;
+  const pipeline = transformers.pipeline;
+  let firstErr = null;
+
+  try {
+    env.remoteHost = 'https://huggingface.co/';
+    asrPipe = await pipeline('automatic-speech-recognition', 'onnx-community/whisper-tiny', {
+      quantized: true,
+    });
+    return asrPipe;
+  } catch (e1) {
+    firstErr = e1;
+    console.warn('Загрузка onnx-community/whisper-tiny с huggingface.co не удалась, пробуем Xenova/whisper-tiny:', e1);
+  }
+
+  try {
+    env.remoteHost = 'https://huggingface.co/';
+    asrPipe = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny', {
+      quantized: true,
+    });
+    return asrPipe;
+  } catch (e2) {
+    console.warn('Загрузка Xenova/whisper-tiny с huggingface.co не удалась, пробуем через hf-mirror.com:', e2);
+  }
+
+  try {
+    env.remoteHost = 'https://hf-mirror.com/';
+    asrPipe = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny', {
+      quantized: true,
+    });
+    return asrPipe;
+  } catch (e3) {
+    console.warn('Загрузка с hf-mirror.com не удалась:', e3);
+    throw new Error(
+      'Ошибка загрузки модели Whisper (проверь интернет или VPN): ' +
+        ((firstErr && firstErr.message) || firstErr)
+    );
+  }
 }
 
 // Пересэмплирование аудиофрагмента в 16 кГц и распознавание через Whisper
@@ -86,7 +280,13 @@ async function recognizeAudioFromUrl(url, headTo, tailFrom, tailTo) {
   const buf = await resp.arrayBuffer();
   const AC = window.AudioContext || window.webkitAudioContext;
   const ac = new AC();
-  const decoded = await ac.decodeAudioData(buf);
+  let decoded;
+  try {
+    decoded = await ac.decodeAudioData(buf);
+  } catch (e) {
+    throw new Error('Unable to decode audio data: видео-контейнер не поддерживается напрямую Web Audio API.');
+  }
+  if (!decoded || decoded.duration <= 0) throw new Error('В этом видео нет аудиодорожки.');
 
   const headText = await transcribeSegment(decoded, 0, headTo);
   const tailText = await transcribeSegment(decoded, tailFrom, Math.min(decoded.duration, tailTo));
@@ -105,12 +305,37 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'ocrDo') {
     (async () => {
       try {
-        const w = await getTWorker();
-        const { data } = await w.recognize(msg.image);
-        sendResponse({ text: (data && data.text) || '' });
+        const text = await doOcr(msg.image);
+        sendResponse({ ok: true, text });
       } catch (e) {
-        tWorkerPromise = null; // сбрасываем, чтобы следующий запрос поднял воркер заново
-        sendResponse({ error: String((e && e.message) || e) });
+        tWorkerPromise = null;
+        sendResponse({ ok: false, error: String((e && e.message) || e) });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.type === 'ocrImageUrl') {
+    (async () => {
+      try {
+        const text = await recognizeImageUrl(msg.url);
+        sendResponse({ ok: true, text });
+      } catch (e) {
+        tWorkerPromise = null;
+        sendResponse({ ok: false, error: String((e && e.message) || e) });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.type === 'ocrVideoDo') {
+    (async () => {
+      try {
+        const res = await extractVideoFramesAndOcr(msg.url, msg.headTimestamps || [], msg.tailTimestamps || []);
+        sendResponse({ ok: true, headText: res.headText, tailText: res.tailText });
+      } catch (e) {
+        tWorkerPromise = null;
+        sendResponse({ ok: false, error: String((e && e.message) || e) });
       }
     })();
     return true;
@@ -119,9 +344,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'asrDo') {
     (async () => {
       try {
-        sendResponse({ text: await recognizeAudioBase64(msg.audio) });
+        const text = await recognizeAudioBase64(msg.audio);
+        sendResponse({ ok: true, text });
       } catch (e) {
-        sendResponse({ error: String((e && e.message) || e) });
+        sendResponse({ ok: false, error: String((e && e.message) || e) });
       }
     })();
     return true;
@@ -133,7 +359,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const res = await recognizeAudioFromUrl(msg.url, msg.headTo, msg.tailFrom, msg.tailTo);
         sendResponse({ ok: true, headText: res.headText, tailText: res.tailText });
       } catch (e) {
-        sendResponse({ error: String((e && e.message) || e) });
+        sendResponse({ ok: false, error: String((e && e.message) || e) });
       }
     })();
     return true;

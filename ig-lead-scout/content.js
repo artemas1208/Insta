@@ -811,8 +811,20 @@
     bar.className = 'igx-seekbar';
     bar.innerHTML =
       '<div class="igx-seek-track"><div class="igx-seek-fill"></div><div class="igx-seek-knob"></div></div>' +
-      '<span class="igx-seek-time">0:00 / 0:00</span>';
+      '<span class="igx-seek-time">0:00 / 0:00</span>' +
+      '<button type="button" class="igx-seek-ocr" title="Извлечь хук и призыв">📝</button>';
     document.body.appendChild(bar);
+
+    const ocrBtn = bar.querySelector('.igx-seek-ocr');
+    if (ocrBtn) {
+      ocrBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openOcrPopup(ocrBtn);
+      });
+      ocrBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
+      ocrBtn.addEventListener('mousedown', (e) => e.stopPropagation());
+    }
 
     const track = bar.querySelector('.igx-seek-track');
     const fill = bar.querySelector('.igx-seek-fill');
@@ -952,100 +964,169 @@
     window.addEventListener('click', onClick, true);
   }
 
-  // ---------- извлечение текста из видео (хук + призыв) ----------
-  // Кнопка 📝 на полоске: снимаем кадры первых и последних секунд видео,
-  // прогоняем через Tesseract в воркере расширения, копируем результат в буфер.
+  // ---------- извлечение текста из видео / слайдов (хук + призыв) ----------
+  // Кнопка 📝 на полоске / в панели: снимаем кадры первых и последних секунд видео
+  // или слайды карусели, прогоняем через Tesseract / Whisper, копируем результат в буфер.
   const OCR_START_KEY = 'igx_ocr_start_sec';
   const OCR_END_KEY = 'igx_ocr_end_sec';
   const OCR_MODE_KEY = 'igx_ocr_mode';
+  const OCR_START_SLIDES_KEY = 'igx_ocr_start_slides';
+  const OCR_END_SLIDES_KEY = 'igx_ocr_end_slides';
   let igxOcrPop = null;
+  let igxActiveMediaType = 'video'; // 'video' или 'carousel'
 
-  // Распознавание крутится в offscreen-документе расширения: контент-скриптам Хром
-  // ЗАПРЕЩАЕТ создавать Worker из файлов расширения (та была прежняя ошибка).
-  // Сюда — только сообщения.
-  function ocrRecognize(dataUrl) {
-    const req = chrome.runtime.sendMessage({ type: 'ocrRecognize', image: dataUrl });
-    const timeout = new Promise((_, rej) =>
-      setTimeout(
-        () =>
-          rej(
-            new Error(
-              'Таймаут распознавания (45 с). Проверь, что в lib/ есть rus.traineddata.gz, и перезагрузи расширение.'
-            )
-          ),
-        45000
-      )
-    );
-    return Promise.race([req, timeout]).then((r) => {
-      if (!r) throw new Error('Распознавалка не ответила.');
-      if (r.error) throw new Error(r.error);
-      return r.text || '';
-    });
-  }
-
-  function asrRecognize(base64) {
-    return chrome.runtime.sendMessage({ type: 'asrRecognize', audio: base64 }).then((r) => {
-      if (!r) throw new Error('Распознавалка не ответила.');
-      if (r.error) throw new Error(r.error);
-      return (r.text || '').trim();
-    });
-  }
-
-  function asrRecognizeUrl(url, headTo, tailFrom, tailTo) {
+  // Распознавание крутится в offscreen-документе расширения (Tesseract rus+eng + Whisper)
+  function safeSendMessage(msg) {
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Таймаут распознавания речи (120 с).')), 120000);
-      chrome.runtime.sendMessage(
-        { type: 'asrRecognizeUrl', url, headTo, tailFrom, tailTo },
-        (r) => {
-          clearTimeout(timer);
+      if (!chrome.runtime || !chrome.runtime.id) {
+        return reject(new Error('Расширение было обновлено в браузере. Пожалуйста, обнови страницу Instagram (F5).'));
+      }
+      try {
+        chrome.runtime.sendMessage(msg, (res) => {
           if (chrome.runtime.lastError) {
-            return reject(new Error(chrome.runtime.lastError.message));
+            const err = (chrome.runtime.lastError && chrome.runtime.lastError.message) || '';
+            if (err.includes('context invalidated')) {
+              return reject(new Error('Расширение было обновлено в браузере. Пожалуйста, обнови страницу Instagram (F5).'));
+            }
+            return reject(new Error(err));
           }
-          if (!r) return reject(new Error('Распознавалка речи не ответила.'));
-          if (r.error) return reject(new Error(r.error));
-          resolve({ headText: (r.headText || '').trim(), tailText: (r.tailText || '').trim() });
+          resolve(res);
+        });
+      } catch (e) {
+        if (String(e).includes('context invalidated')) {
+          return reject(new Error('Расширение было обновлено в браузере. Пожалуйста, обнови страницу Instagram (F5).'));
         }
-      );
+        reject(e);
+      }
     });
   }
 
-  // Захват кадра видео через снимок вкладки, когда canvas блокируется CORS-защитой видео
-  function captureVideoViaTab(video) {
+  async function ocrRecognize(dataUrl) {
+    const timer = new Promise((_, rej) =>
+      setTimeout(() => rej(new Error('Таймаут распознавания кадра (35 с).')), 35000)
+    );
+    const r = await Promise.race([
+      safeSendMessage({ type: 'ocrRecognize', image: dataUrl }),
+      timer,
+    ]);
+    if (!r) throw new Error('Распознавалка не ответила.');
+    if (r.error) throw new Error(r.error);
+    return (r.text || '').trim();
+  }
+
+  async function ocrRecognizeUrl(url) {
+    const timer = new Promise((_, rej) =>
+      setTimeout(() => rej(new Error('Таймаут распознавания слайда (35 с).')), 35000)
+    );
+    const r = await Promise.race([
+      safeSendMessage({ type: 'ocrRecognizeUrl', url }),
+      timer,
+    ]);
+    if (!r) throw new Error('Распознавалка не ответила.');
+    if (r.error) throw new Error(r.error);
+    return (r.text || '').trim();
+  }
+
+  async function ocrVideoDirect(url, headTimestamps, tailTimestamps) {
+    const timer = new Promise((_, rej) =>
+      setTimeout(() => rej(new Error('Таймаут прямого распознавания видео (60 с).')), 60000)
+    );
+    const res = await Promise.race([
+      safeSendMessage({ type: 'ocrVideoDirect', url, headTimestamps, tailTimestamps }),
+      timer,
+    ]);
+    if (!res) throw new Error('Распознавалка не ответила.');
+    if (res.error) throw new Error(res.error);
+    return { headText: (res.headText || '').trim(), tailText: (res.tailText || '').trim() };
+  }
+
+  async function asrRecognize(base64) {
+    const timer = new Promise((_, rej) =>
+      setTimeout(() => rej(new Error('Таймаут распознавания речи Whisper (60 с).')), 60000)
+    );
+    const r = await Promise.race([
+      safeSendMessage({ type: 'asrRecognize', audio: base64 }),
+      timer,
+    ]);
+    if (!r) throw new Error('Распознавалка речи не ответила.');
+    if (r.error) throw new Error(r.error);
+    return (r.text || '').trim();
+  }
+
+  async function asrRecognizeUrl(url, headTo, tailFrom, tailTo) {
+    const timer = new Promise((_, rej) =>
+      setTimeout(() => rej(new Error('Таймаут распознавания речи Whisper (120 с).')), 120000)
+    );
+    const r = await Promise.race([
+      safeSendMessage({ type: 'asrRecognizeUrl', url, headTo, tailFrom, tailTo }),
+      timer,
+    ]);
+    if (!r) throw new Error('Распознавалка речи не ответила.');
+    if (r.error) throw new Error(r.error);
+    return { headText: (r.headText || '').trim(), tailText: (r.tailText || '').trim() };
+  }
+
+  // Поиск прямого HTTP URL видео только если это полноценный MP4 (не частичный DASH chunk)
+  function findVideoUrl(video) {
+    if (!video) return null;
+    const src = video.currentSrc || video.src || '';
+    if (src.startsWith('http') && src.includes('.mp4') && !src.includes('bytestart=')) {
+      return src;
+    }
+    const sourceEl = video.querySelector('source');
+    if (sourceEl && sourceEl.src && sourceEl.src.startsWith('http') && !sourceEl.src.includes('bytestart=')) {
+      return sourceEl.src;
+    }
+    return null;
+  }
+
+  // Захват кадра через снимок вкладки с точным масштабированием
+  function captureVideoViaTab(element) {
     return new Promise((resolve, reject) => {
-      chrome.runtime.sendMessage({ type: 'captureTab' }, (res) => {
-        if (!res || !res.dataUrl) {
-          return reject(new Error((res && res.error) || 'Снимок вкладки не удался.'));
-        }
-        const img = new Image();
-        img.onload = () => {
-          try {
-            const r = video.getBoundingClientRect();
-            const dpr = window.devicePixelRatio || 1;
-            const cropCnv = document.createElement('canvas');
-            const w = Math.max(1, r.width * dpr);
-            const h = Math.max(1, r.height * dpr);
-            const scale = Math.min(1, 960 / Math.max(w, h));
-            cropCnv.width = Math.max(1, Math.round(w * scale));
-            cropCnv.height = Math.max(1, Math.round(h * scale));
-            const cropCtx = cropCnv.getContext('2d');
-            cropCtx.drawImage(
-              img,
-              Math.round(r.left * dpr),
-              Math.round(r.top * dpr),
-              Math.round(w),
-              Math.round(h),
-              0,
-              0,
-              cropCnv.width,
-              cropCnv.height
-            );
-            resolve(cropCnv.toDataURL('image/jpeg', 0.85));
-          } catch (e) {
-            reject(e);
-          }
-        };
-        img.onerror = reject;
-        img.src = res.dataUrl;
+      const pop = igxOcrPop;
+      // Временно делаем попап прозрачным ТОЛЬКО на короткий миг вызова captureTab (1 кадр)
+      if (pop) pop.style.opacity = '0';
+      requestAnimationFrame(() => {
+        safeSendMessage({ type: 'captureTab' })
+          .then((res) => {
+            if (pop) pop.style.opacity = '1';
+            if (!res || !res.dataUrl) {
+              return reject(new Error((res && res.error) || 'Снимок вкладки не удался.'));
+            }
+            const img = new Image();
+            img.onload = () => {
+              try {
+                const r = element.getBoundingClientRect();
+                const scaleX = img.naturalWidth / window.innerWidth;
+                const scaleY = img.naturalHeight / window.innerHeight;
+
+                const sx = Math.max(0, Math.round(r.left * scaleX));
+                const sy = Math.max(0, Math.round(r.top * scaleY));
+                const sw = Math.min(img.naturalWidth - sx, Math.max(1, Math.round(r.width * scaleX)));
+                const sh = Math.min(img.naturalHeight - sy, Math.max(1, Math.round(r.height * scaleY)));
+
+                if (sw <= 0 || sh <= 0) {
+                  return reject(new Error('Элемент за пределами видимой области экрана.'));
+                }
+
+                const scale = Math.min(1.5, 1280 / Math.max(sw, sh));
+                const cropCnv = document.createElement('canvas');
+                cropCnv.width = Math.max(1, Math.round(sw * scale));
+                cropCnv.height = Math.max(1, Math.round(sh * scale));
+                const cropCtx = cropCnv.getContext('2d');
+                cropCtx.drawImage(img, sx, sy, sw, sh, 0, 0, cropCnv.width, cropCnv.height);
+                resolve(cropCnv.toDataURL('image/jpeg', 0.92));
+              } catch (e) {
+                reject(e);
+              }
+            };
+            img.onerror = reject;
+            img.src = res.dataUrl;
+          })
+          .catch((err) => {
+            if (pop) pop.style.opacity = '1';
+            reject(err);
+          });
       });
     });
   }
@@ -1058,51 +1139,46 @@
         done = true;
         video.removeEventListener('seeked', fin);
         clearTimeout(to);
-        resolve();
+        if (video.requestVideoFrameCallback) {
+          video.requestVideoFrameCallback(() => requestAnimationFrame(resolve));
+        } else {
+          requestAnimationFrame(() => requestAnimationFrame(resolve));
+        }
       };
-      const to = setTimeout(fin, 2500);
-      video.addEventListener('seeked', fin);
+      const to = setTimeout(fin, 500);
+      video.addEventListener('seeked', fin, { once: true });
       try {
-        video.currentTime = t;
+        video.currentTime = Math.min(Math.max(0.01, (video.duration || 10) - 0.05), Math.max(0.01, t));
       } catch (_) {
         fin();
       }
     });
   }
 
-  async function captureRange(video, from, to) {
+  async function captureRange(video, from, to, isHead, statusEl, label) {
     const frames = [];
-    const w = video.videoWidth || 720;
-    const h = video.videoHeight || 1280;
-    const scale = Math.min(1, 960 / Math.max(w, h)); // крупнее — точнее распознавание, но не гигантские кадры
-    const cnv = document.createElement('canvas');
-    cnv.width = Math.max(1, Math.round(w * scale));
-    cnv.height = Math.max(1, Math.round(h * scale));
-    const ctx = cnv.getContext('2d', { willReadFrequently: true });
-
-    let isTainted = false;
+    let timestamps = [];
     const dur = Math.max(0.1, to - from);
-    const step = Math.max(1.2, dur / 5); // 5–6 ключевых кадров вместо 30 (в 3 раза быстрее)
-    for (let t = from; t <= to + 0.01 && frames.length < 8; t += step) {
-      await videoSeekTo(video, t);
-      if (!isTainted) {
-        try {
-          ctx.drawImage(video, 0, 0, cnv.width, cnv.height);
-          const dataUrl = cnv.toDataURL('image/jpeg', 0.85);
-          frames.push(dataUrl);
-          continue;
-        } catch (_) {
-          // Canvas tainted cross-origin — переключаемся на захват вкладки
-          isTainted = true;
-        }
-      }
 
-      // Запасной путь при CORS-защите: снимок через вкладку
+    if (isHead) {
+      // Для начала видео обязательно захватываем самый первый кадр (0.05 с) для хука!
+      timestamps = [0.05, 0.8, Math.min(to, 2.0)];
+      if (to > 3.0) timestamps.push(Math.max(0.5, to - 0.3));
+    } else {
+      timestamps = [from + Math.min(0.5, dur * 0.2), from + dur * 0.6, Math.max(from, to - 0.2)];
+    }
+
+    for (let i = 0; i < timestamps.length; i++) {
+      const t = timestamps[i];
+      if (statusEl) {
+        statusEl.textContent = `Снимаю кадр ${label} (${i + 1}/${timestamps.length}, ${t.toFixed(1)} с)…`;
+      }
+      await videoSeekTo(video, t);
       try {
         const tabFrame = await captureVideoViaTab(video);
         if (tabFrame) frames.push(tabFrame);
       } catch (err) {
-        console.warn('Ошибка захвата кадра через вкладку:', err);
+        console.warn('captureVideoViaTab failed:', err);
       }
     }
     return frames;
@@ -1115,6 +1191,7 @@
       .map((l) => l.trim())
       .filter(Boolean)
       .filter((l) => {
+        if (l.length <= 1 && !/\d/.test(l)) return false;
         const key = l.toLowerCase().replace(/\s+/g, ' ');
         if (seen.has(key)) return false;
         seen.add(key);
@@ -1123,12 +1200,12 @@
       .join('\n');
   }
 
-  // Самое видимое видео на экране (у которого есть длина) — его и мотаем/слушаем.
+  // Самое видимое видео на экране
   function pickBestVideo() {
     let best = null;
     let bestArea = 0;
     document.querySelectorAll('video').forEach((v) => {
-      if (!isFinite(v.duration) || v.duration <= 1) return;
+      if (!isFinite(v.duration) || v.duration <= 0.5) return;
       const r = v.getBoundingClientRect();
       const visW = Math.min(r.right, window.innerWidth) - Math.max(r.left, 0);
       const visH = Math.min(r.bottom, window.innerHeight) - Math.max(r.top, 0);
@@ -1141,18 +1218,213 @@
     return best;
   }
 
-  // Запись звука из куска видео: перемотал, проиграл беззвучно для тебя, записал дорожку.
-  async function recordRange(video, from, to) {
-    if (typeof video.captureStream !== 'function') throw new Error('Браузер не даёт захватить звук из этого видео.');
-    let stream;
-    try {
-      stream = video.captureStream();
-    } catch (e) {
-      throw new Error('CORS-защита видео не даёт захватить аудиопоток (' + ((e && e.message) || e) + ').');
+  // Определение типа медиа на текущем посте (видео или карусель со слайдами)
+  function detectCurrentPostMedia() {
+    const dialog = document.querySelector('[role="dialog"]');
+    const scope = dialog || document.querySelector('article') || document.querySelector('main') || document.body;
+
+    const nextBtn = scope.querySelector(
+      'button[aria-label="Next"], button[aria-label="Далее"], button[aria-label*="Next"], button[aria-label*="Далее"], button[aria-label*="Следующ"], button._afxw'
+    );
+    const prevBtn = scope.querySelector(
+      'button[aria-label="Previous"], button[aria-label="Назад"], button[aria-label="Go back"], button[aria-label*="Previous"], button[aria-label*="Назад"], button[aria-label*="Back"]'
+    );
+    const dots = scope.querySelectorAll('div._acaz, div[role="tablist"] > div, ul._acay > li');
+
+    const video = scope.querySelector('video');
+
+    if (nextBtn || prevBtn || dots.length > 1) {
+      let totalSlides = dots.length;
+      if (totalSlides <= 1) {
+        const textIndicators = scope.innerText.match(/(\d+)\s*\/\s*(\d+)/);
+        if (textIndicators && textIndicators[2]) {
+          totalSlides = parseInt(textIndicators[2], 10);
+        }
+      }
+      return {
+        type: 'carousel',
+        totalSlides: Math.max(2, totalSlides || 10),
+        scope,
+        video,
+      };
     }
-    const tracks = stream.getAudioTracks();
-    if (!tracks.length) throw new Error('В этом видео нет звуковой дорожки.');
-    const rec = new MediaRecorder(new MediaStream(tracks));
+
+    if (video && isFinite(video.duration) && video.duration > 0.5) {
+      return {
+        type: 'video',
+        video,
+        scope,
+      };
+    }
+
+    return null;
+  }
+
+  // Расчёт временных окон для видео:
+  // Если начало + конец > длительности — делим видео строго пополам!
+  function getVideoWindows(duration, startSec, endSec) {
+    const d = Math.max(0.1, duration);
+    let headTo = 0;
+    let tailFrom = 0;
+    let tailTo = d;
+
+    if (startSec + endSec > d) {
+      const mid = d / 2;
+      headTo = mid;
+      tailFrom = mid;
+      tailTo = d;
+    } else {
+      headTo = Math.min(startSec, d);
+      tailFrom = Math.max(0, d - endSec);
+      tailTo = d;
+    }
+    return { headTo, tailFrom, tailTo };
+  }
+
+  // Расчёт слайдов для карусели:
+  // Если начало + конец > числа слайдов — делим пополам (хук до середины, призыв после).
+  function getSlideWindows(total, startCount, endCount) {
+    const n = Math.max(1, total);
+    let headSlides = [];
+    let tailSlides = [];
+    if (startCount + endCount > n) {
+      const mid = Math.ceil(n / 2);
+      for (let i = 1; i <= mid; i++) headSlides.push(i);
+      for (let i = mid + 1; i <= n; i++) tailSlides.push(i);
+      if (tailSlides.length === 0 && n === 1) tailSlides.push(1);
+    } else {
+      for (let i = 1; i <= Math.min(startCount, n); i++) headSlides.push(i);
+      for (let i = Math.max(1, n - endCount + 1); i <= n; i++) tailSlides.push(i);
+    }
+    return { headSlides, tailSlides };
+  }
+
+  // Извлечение текста со слайдов карусели
+  async function extractCarouselSlides(postMedia, headSlides, tailSlides, statusEl) {
+    const scope = postMedia.scope || document;
+    const targetSlides = new Set([...headSlides, ...tailSlides]);
+    const maxTarget = Math.max(...targetSlides);
+
+    // 1. Отматываем карусель назад до 1-го слайда
+    if (statusEl) statusEl.textContent = 'Перехожу к началу слайдов…';
+    for (let step = 0; step < 15; step++) {
+      const prev = scope.querySelector(
+        'button[aria-label="Previous"], button[aria-label="Назад"], button[aria-label="Go back"], button[aria-label*="Previous"], button[aria-label*="Назад"], button[aria-label*="Back"]'
+      );
+      if (!prev || prev.disabled || prev.offsetParent === null) break;
+      prev.click();
+      await new Promise((r) => setTimeout(r, 120));
+    }
+
+    const captured = {};
+
+    function getVisibleSlideElement() {
+      const imgs = Array.from(
+        scope.querySelectorAll('img[src*="cdninstagram"], img[src*="fbcdn"], article img, [role="dialog"] img')
+      ).filter((el) => {
+        const r = el.getBoundingClientRect();
+        return r.width > 120 && r.height > 120 && r.right > 0 && r.left < window.innerWidth;
+      });
+      if (imgs.length > 0) {
+        imgs.sort((a, b) => {
+          const ra = a.getBoundingClientRect();
+          const rb = b.getBoundingClientRect();
+          const distA = Math.abs(ra.left + ra.width / 2 - window.innerWidth / 2);
+          const distB = Math.abs(rb.left + rb.width / 2 - window.innerWidth / 2);
+          return distA - distB;
+        });
+        return imgs[0];
+      }
+      return scope.querySelector('video') || scope.querySelector('img');
+    }
+
+    for (let cur = 1; cur <= maxTarget; cur++) {
+      if (targetSlides.has(cur)) {
+        if (statusEl) statusEl.textContent = `Захватываю слайд ${cur}…`;
+        const el = getVisibleSlideElement();
+        if (el) {
+          const src = el.currentSrc || el.src;
+          let dUrl = null;
+          try {
+            dUrl = await captureVideoViaTab(el);
+          } catch (_) {}
+          captured[cur] = {
+            url: (src && src.startsWith('http')) ? src : null,
+            dataUrl: dUrl,
+          };
+        }
+      }
+
+      if (cur < maxTarget) {
+        const next = scope.querySelector(
+          'button[aria-label="Next"], button[aria-label="Далее"], button[aria-label*="Next"], button[aria-label*="Далее"], button[aria-label*="Следующ"], button._afxw'
+        );
+        if (!next || next.disabled || next.offsetParent === null) break;
+        next.click();
+        await new Promise((r) => setTimeout(r, 240));
+      }
+    }
+
+    async function ocrItem(item) {
+      if (!item) return '';
+      if (item.url) {
+        try {
+          const txt = await ocrRecognizeUrl(item.url);
+          if (txt && txt.trim()) return txt.trim();
+        } catch (e) {
+          console.warn('ocrRecognizeUrl failed, fallback to screen capture:', e);
+        }
+      }
+      if (item.dataUrl) {
+        try {
+          const txt = await ocrRecognize(item.dataUrl);
+          if (txt && txt.trim()) return txt.trim();
+        } catch (e) {
+          console.warn('ocrRecognize screen capture failed:', e);
+        }
+      }
+      return '';
+    }
+
+    const headTexts = [];
+    for (const s of headSlides) {
+      if (statusEl) statusEl.textContent = `Распознаю текст слайда ${s} (хук)…`;
+      try {
+        const txt = await ocrItem(captured[s]);
+        if (txt) headTexts.push(`[Слайд ${s}]\n${txt}`);
+      } catch (e) {
+        console.warn(`Ошибка OCR слайда ${s}:`, e);
+      }
+    }
+
+    const tailTexts = [];
+    for (const s of tailSlides) {
+      if (statusEl) statusEl.textContent = `Распознаю текст слайда ${s} (призыв)…`;
+      try {
+        const txt = await ocrItem(captured[s]);
+        if (txt) tailTexts.push(`[Слайд ${s}]\n${txt}`);
+      } catch (e) {
+        console.warn(`Ошибка OCR слайда ${s}:`, e);
+      }
+    }
+
+    return {
+      headText: compactOcrText(headTexts.join('\n')),
+      tailText: compactOcrText(tailTexts.join('\n')),
+    };
+  }
+
+  // Запись звука из куска видео в плеере без оглушения пользователя
+  async function recordRange(video, from, to) {
+    if (typeof video.captureStream !== 'function' && typeof video.mozCaptureStream !== 'function') {
+      throw new Error('Браузер не даёт захватить звук из этого видео.');
+    }
+    const cs = video.captureStream ? video.captureStream() : video.mozCaptureStream();
+    const tracks = cs.getAudioTracks();
+    if (!tracks || !tracks.length) throw new Error('В этом видео нет звуковой дорожки.');
+
+    const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
+    const rec = new MediaRecorder(new MediaStream(tracks), { mimeType: mime });
     const chunks = [];
     rec.ondataavailable = (e) => {
       if (e.data && e.data.size) chunks.push(e.data);
@@ -1160,28 +1432,37 @@
     const stopped = new Promise((res) => {
       rec.onstop = res;
     });
+
     const wasMuted = video.muted;
     const prevVolume = video.volume;
-    video.muted = true;
-    await videoSeekTo(video, from);
-    // На время записи включаем звук на минимальной громкости, чтобы captureStream не глушился
+    const prevTime = video.currentTime;
+
+    // ВАЖНО: включаем звук на минимальную громкость 0.01,
+    // чтобы браузер выдавал реальные сэмплы в аудиопоток, а не тишину
     video.muted = false;
-    video.volume = 0.02;
+    video.volume = 0.01;
+    video.currentTime = from;
+
+    await new Promise((r) => setTimeout(r, 150));
+    rec.start();
     try {
-      video.play();
+      await video.play();
     } catch (_) {}
-    rec.start(250);
-    await new Promise((res) => setTimeout(res, Math.max(500, (to - from) * 1000)));
-    try {
-      rec.stop();
-    } catch (_) {}
+
+    const dur = Math.max(0.5, to - from);
+    await new Promise((r) => setTimeout(r, Math.round(dur * 1000)));
+
+    rec.stop();
     await stopped;
     tracks.forEach((t) => t.stop());
+
     try {
       video.pause();
     } catch (_) {}
+    video.currentTime = prevTime;
     video.volume = prevVolume;
     video.muted = wasMuted;
+
     return new Blob(chunks, { type: 'audio/webm' });
   }
 
@@ -1197,14 +1478,17 @@
   async function ocrFrames(frames, statusEl, label) {
     const out = [];
     for (let i = 0; i < frames.length; i++) {
-      if (statusEl) statusEl.textContent = `Распознаю ${label}: ${i + 1}/${frames.length}…`;
+      if (statusEl) {
+        statusEl.textContent = `Распознаю текст ${label} (${i + 1}/${frames.length})…`;
+      }
       try {
-        out.push(await ocrRecognize(frames[i]));
-      } catch (err) {
-        if (i === 0) throw err; // первый кадр не распознался — движка нет, сообщаем дальше
+        const txt = await ocrRecognize(frames[i]);
+        if (txt) out.push(txt);
+      } catch (e) {
+        console.warn(`Ошибка OCR кадра ${i + 1}:`, e);
       }
     }
-    return out.join('\n');
+    return out;
   }
 
   async function copyToClipboard(text) {
@@ -1216,9 +1500,13 @@
       const ta = document.createElement('textarea');
       ta.value = text;
       ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      ta.style.top = '-9999px';
       ta.style.opacity = '0';
       document.body.appendChild(ta);
+      ta.focus();
       ta.select();
+      ta.setSelectionRange(0, 999999);
       const ok = document.execCommand('copy');
       ta.remove();
       return ok;
@@ -1233,31 +1521,142 @@
     return Math.min(60, Math.max(1, n));
   }
 
+  // Перетаскивание меню извлечения за шапку в любое место экрана
+  function initOcrPopDrag(pop) {
+    const head = pop.querySelector('.igx-ocr-head');
+    if (!head || head.dataset.igxDragInit) return;
+    head.dataset.igxDragInit = '1';
+
+    let dragging = null;
+
+    head.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      if (e.target.closest('button, input, select, a')) return;
+      const r = pop.getBoundingClientRect();
+      dragging = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+      try { head.setPointerCapture(e.pointerId); } catch (_) {}
+      pop.classList.add('is-dragging');
+      e.preventDefault();
+      e.stopPropagation();
+    });
+
+    head.addEventListener('pointermove', (e) => {
+      if (!dragging || !pop || pop.style.display === 'none') return;
+      const maxW = Math.max(60, window.innerWidth - 60);
+      const maxH = Math.max(40, window.innerHeight - 40);
+      const x = Math.min(Math.max(4, e.clientX - dragging.dx), maxW);
+      const y = Math.min(Math.max(4, e.clientY - dragging.dy), maxH);
+      pop.style.left = `${Math.round(x)}px`;
+      pop.style.top = `${Math.round(y)}px`;
+      pop.style.right = 'auto';
+      pop.style.bottom = 'auto';
+    });
+
+    const onUp = (e) => {
+      if (!dragging) return;
+      try { head.releasePointerCapture(e.pointerId); } catch (_) {}
+      dragging = null;
+      pop.classList.remove('is-dragging');
+      chrome.storage.local.set({ igx_ocr_pos: { left: pop.style.left, top: pop.style.top } }).catch(() => {});
+    };
+
+    head.addEventListener('pointerup', onUp);
+    head.addEventListener('pointercancel', onUp);
+  }
+
   function ensureOcrPopup() {
     if (igxOcrPop && document.body.contains(igxOcrPop)) return igxOcrPop;
     const pop = document.createElement('div');
     pop.className = 'igx-ocr-pop';
     pop.innerHTML =
-      '<div class="igx-ocr-head"><span>Извлечение текста из видео</span><button class="igx-ocr-close" title="Закрыть">✕</button></div>' +
-      '<div class="igx-ocr-row">' +
-      '<label>Первые сек <input type="number" class="igx-ocr-start" min="1" max="60" value="7"></label>' +
-      '<label>Последние сек <input type="number" class="igx-ocr-end" min="1" max="60" value="7"></label>' +
+      '<div class="igx-ocr-head"><span class="igx-ocr-title">Извлечение текста</span><button class="igx-ocr-close" title="Закрыть">✕</button></div>' +
+      '<div class="igx-ocr-tabs">' +
+      '<button type="button" class="igx-ocr-tab igx-tab-video active">🎬 Видео</button>' +
+      '<button type="button" class="igx-ocr-tab igx-tab-slides">🖼 Слайды</button>' +
       '</div>' +
-      '<div class="igx-ocr-row igx-ocr-modes">' +
+      '<div class="igx-ocr-inputs">' +
+      '<label><span class="igx-lbl-start">Первые сек</span> <input type="number" class="igx-ocr-start" min="1" max="60" value="7"></label>' +
+      '<label><span class="igx-lbl-end">Последние сек</span> <input type="number" class="igx-ocr-end" min="1" max="60" value="7"></label>' +
+      '</div>' +
+      '<div class="igx-ocr-modes">' +
       '<label title="Распознаёт надписи на кадрах"><input type="radio" name="igx-ocr-mode" value="text" checked> Текст с экрана</label>' +
-      '<label title="Распознаёт речь из звука (первый запуск качает модель ~40 МБ)"><input type="radio" name="igx-ocr-mode" value="audio"> Речь из звука</label>' +
+      '<label title="Распознаёт речь из звука через Whisper"><input type="radio" name="igx-ocr-mode" value="audio"> Речь из звука</label>' +
       '</div>' +
+      '<div class="igx-ocr-badge igx-ocr-slide-note" style="display:none;">На слайдах текст распознаётся со слайдов</div>' +
       '<button class="igx-btn igx-ocr-run">📝 Извлечь и скопировать</button>' +
-      '<div class="igx-ocr-status"></div>';
+      '<div class="igx-ocr-status"></div>' +
+      '<div class="igx-ocr-result-wrap" style="display:none;">' +
+      '<div class="igx-ocr-result-head"><span>Результат:</span><button type="button" class="igx-ocr-copy-btn">📋 Скопировать</button></div>' +
+      '<textarea class="igx-ocr-result-text" rows="5" readonly></textarea>' +
+      '</div>';
     document.body.appendChild(pop);
+
+    initOcrPopDrag(pop);
+
     pop.querySelector('.igx-ocr-close').addEventListener('click', () => {
       pop.style.display = 'none';
     });
     pop.querySelector('.igx-ocr-run').addEventListener('click', () => ocrRun());
-    // клики внутри попапа не должны уходить ИГ (пауза видео и т.п.)
+
+    const copyBtn = pop.querySelector('.igx-ocr-copy-btn');
+    const resultText = pop.querySelector('.igx-ocr-result-text');
+    copyBtn.addEventListener('click', async () => {
+      const text = resultText.value;
+      if (!text) return;
+      const ok = await copyToClipboard(text);
+      if (ok) {
+        copyBtn.textContent = '✓ Скопировано!';
+        setTimeout(() => { copyBtn.textContent = '📋 Скопировать'; }, 2000);
+      } else {
+        resultText.focus();
+        resultText.select();
+        document.execCommand('copy');
+        copyBtn.textContent = '✓ Скопировано!';
+        setTimeout(() => { copyBtn.textContent = '📋 Скопировать'; }, 2000);
+      }
+    });
+
     ['pointerdown', 'mousedown', 'click'].forEach((ev) => {
       pop.addEventListener(ev, (e) => e.stopPropagation());
     });
+
+    const tabVideo = pop.querySelector('.igx-tab-video');
+    const tabSlides = pop.querySelector('.igx-tab-slides');
+
+    function setMediaTypeUI(type) {
+      igxActiveMediaType = type;
+      if (type === 'carousel') {
+        tabSlides.classList.add('active');
+        tabVideo.classList.remove('active');
+        pop.querySelector('.igx-ocr-title').textContent = 'Извлечение текста со слайдов';
+        pop.querySelector('.igx-lbl-start').textContent = 'Первые слайды';
+        pop.querySelector('.igx-lbl-end').textContent = 'Последние слайды';
+        pop.querySelector('.igx-ocr-modes').style.display = 'none';
+        pop.querySelector('.igx-ocr-slide-note').style.display = 'block';
+        pop.querySelector('.igx-ocr-run').textContent = '🖼 Извлечь текст со слайдов';
+        chrome.storage.local.get([OCR_START_SLIDES_KEY, OCR_END_SLIDES_KEY]).then((d) => {
+          pop.querySelector('.igx-ocr-start').value = d[OCR_START_SLIDES_KEY] || 2;
+          pop.querySelector('.igx-ocr-end').value = d[OCR_END_SLIDES_KEY] || 2;
+        });
+      } else {
+        tabVideo.classList.add('active');
+        tabSlides.classList.remove('active');
+        pop.querySelector('.igx-ocr-title').textContent = 'Извлечение текста из видео';
+        pop.querySelector('.igx-lbl-start').textContent = 'Первые сек';
+        pop.querySelector('.igx-lbl-end').textContent = 'Последние сек';
+        pop.querySelector('.igx-ocr-modes').style.display = 'flex';
+        pop.querySelector('.igx-ocr-slide-note').style.display = 'none';
+        pop.querySelector('.igx-ocr-run').textContent = '📝 Извлечь и скопировать';
+        chrome.storage.local.get([OCR_START_KEY, OCR_END_KEY]).then((d) => {
+          pop.querySelector('.igx-ocr-start').value = d[OCR_START_KEY] || 7;
+          pop.querySelector('.igx-ocr-end').value = d[OCR_END_KEY] || 7;
+        });
+      }
+    }
+
+    tabVideo.addEventListener('click', () => setMediaTypeUI('video'));
+    tabSlides.addEventListener('click', () => setMediaTypeUI('carousel'));
+
     chrome.storage.local.get([OCR_START_KEY, OCR_END_KEY, OCR_MODE_KEY]).then((d) => {
       pop.querySelector('.igx-ocr-start').value = d[OCR_START_KEY] || 7;
       pop.querySelector('.igx-ocr-end').value = d[OCR_END_KEY] || 7;
@@ -1265,6 +1664,7 @@
       const radio = pop.querySelector(`input[name="igx-ocr-mode"][value="${mode}"]`);
       if (radio) radio.checked = true;
     });
+
     igxOcrPop = pop;
     return pop;
   }
@@ -1272,13 +1672,36 @@
   function openOcrPopup(anchorEl) {
     const pop = ensureOcrPopup();
     pop.style.display = 'block';
-    const ar = (anchorEl || document.body).getBoundingClientRect();
-    const h = pop.offsetHeight || 190;
-    let top = ar.top - h - 10;
-    if (top < 8) top = Math.min(window.innerHeight - h - 8, ar.bottom + 10);
-    pop.style.left = Math.max(8, Math.min(ar.left, window.innerWidth - 320)) + 'px';
-    pop.style.top = Math.max(8, top) + 'px';
+
+    chrome.storage.local.get('igx_ocr_pos').then((d) => {
+      if (d && d.igx_ocr_pos && d.igx_ocr_pos.left && d.igx_ocr_pos.top) {
+        pop.style.left = d.igx_ocr_pos.left;
+        pop.style.top = d.igx_ocr_pos.top;
+        pop.style.right = 'auto';
+        pop.style.bottom = 'auto';
+      } else {
+        const ar = (anchorEl || document.body).getBoundingClientRect();
+        const h = pop.offsetHeight || 260;
+        let top = ar.top - h - 10;
+        if (top < 8) top = Math.min(window.innerHeight - h - 8, ar.bottom + 10);
+        pop.style.left = Math.max(8, Math.min(ar.left, window.innerWidth - 350)) + 'px';
+        pop.style.top = Math.max(8, top) + 'px';
+      }
+    });
+
     pop.querySelector('.igx-ocr-status').textContent = '';
+    const resWrap = pop.querySelector('.igx-ocr-result-wrap');
+    if (resWrap) resWrap.style.display = 'none';
+
+    // Автоматическое определение типа медиа на текущем посте
+    const media = detectCurrentPostMedia();
+    const tabVideo = pop.querySelector('.igx-tab-video');
+    const tabSlides = pop.querySelector('.igx-tab-slides');
+    if (media && media.type === 'carousel') {
+      tabSlides.click();
+    } else {
+      tabVideo.click();
+    }
   }
 
   async function ocrRun() {
@@ -1286,16 +1709,69 @@
     if (!pop) return;
     const statusEl = pop.querySelector('.igx-ocr-status');
     const runBtn = pop.querySelector('.igx-ocr-run');
-    const video = pickBestVideo();
+    const resWrap = pop.querySelector('.igx-ocr-result-wrap');
+    const resText = pop.querySelector('.igx-ocr-result-text');
+
+    if (resWrap) resWrap.style.display = 'none';
+
+    const media = detectCurrentPostMedia();
+    const activeType = igxActiveMediaType;
+
+    if (activeType === 'carousel') {
+      const totalSlides = (media && media.totalSlides) || 10;
+      const startCount = ocrClampInt(pop.querySelector('.igx-ocr-start').value, 2);
+      const endCount = ocrClampInt(pop.querySelector('.igx-ocr-end').value, 2);
+      chrome.storage.local.set({ [OCR_START_SLIDES_KEY]: startCount, [OCR_END_SLIDES_KEY]: endCount });
+
+      runBtn.disabled = true;
+      try {
+        const { headSlides, tailSlides } = getSlideWindows(totalSlides, startCount, endCount);
+        const { headText, tailText } = await extractCarouselSlides(
+          media || { scope: document, totalSlides },
+          headSlides,
+          tailSlides,
+          statusEl
+        );
+
+        const headLabel =
+          headSlides.length > 1
+            ? `слайды ${headSlides[0]}–${headSlides[headSlides.length - 1]}`
+            : `слайд ${headSlides[0] || 1}`;
+        const tailLabel =
+          tailSlides.length > 1
+            ? `слайды ${tailSlides[0]}–${tailSlides[tailSlides.length - 1]}`
+            : `слайд ${tailSlides[0] || 1}`;
+
+        const result = `Хук (${headLabel}):\n${headText || '(текст на слайдах не найден)'}\n\nПризыв (${tailLabel}):\n${tailText || '(текст на слайдах не найден)'}`;
+        
+        if (resText && resWrap) {
+          resText.value = result;
+          resWrap.style.display = 'block';
+        }
+
+        const ok = await copyToClipboard(result);
+        statusEl.textContent = ok
+          ? '✓ Скопировано в буфер обмена!'
+          : 'Текст извлечён! Нажми «📋 Скопировать» ниже.';
+      } catch (err) {
+        statusEl.textContent = String((err && err.message) || err);
+      } finally {
+        runBtn.disabled = false;
+      }
+      return;
+    }
+
+    const video = (media && media.video) || pickBestVideo();
     if (!video) {
-      statusEl.textContent = 'На экране нет видео — открой рилс/видео и нажми кнопку заново.';
+      statusEl.textContent = 'На экране нет видео — открой рилс/видео или переключи на вкладку «Слайды».';
       return;
     }
     const d = video.duration;
-    if (!isFinite(d) || d <= 1) {
+    if (!isFinite(d) || d <= 0.5) {
       statusEl.textContent = 'У этого видео нет длины (эфир или ещё грузится).';
       return;
     }
+
     const startSec = ocrClampInt(pop.querySelector('.igx-ocr-start').value, 7);
     const endSec = ocrClampInt(pop.querySelector('.igx-ocr-end').value, 7);
     const modeRadio = pop.querySelector('input[name="igx-ocr-mode"]:checked');
@@ -1307,56 +1783,83 @@
     const prevTime = video.currentTime;
 
     try {
-      const headTo = Math.min(startSec, Math.max(0, d - 0.3));
-      // если видео короче суммы двух окон — не дублируем кадры начала в конце
-      const tailFrom = Math.min(Math.max(d - endSec, headTo + 0.5), Math.max(0, d - 0.3));
-      const tailTo = Math.max(0, d - 0.3);
+      // Логика середины: если startSec + endSec > d, делим видео пополам
+      const { headTo, tailFrom, tailTo } = getVideoWindows(d, startSec, endSec);
       let headText = '';
       let tailText = '';
 
-      if (mode === 'audio') {
-        const directUrl =
-          video.currentSrc && video.currentSrc.startsWith('http')
-            ? video.currentSrc
-            : video.src && video.src.startsWith('http')
-              ? video.src
-              : video.querySelector('source') &&
-                  video.querySelector('source').src &&
-                  video.querySelector('source').src.startsWith('http')
-                ? video.querySelector('source').src
-                : null;
+      const directUrl = findVideoUrl(video);
 
+      if (mode === 'audio') {
+        let asrSuccess = false;
         if (directUrl) {
-          statusEl.textContent = 'Распознаю речь из видео (прямая загрузка аудио)…';
-          const asrRes = await asrRecognizeUrl(directUrl, headTo, tailFrom, tailTo);
-          headText = asrRes.headText;
-          tailText = asrRes.tailText;
-        } else {
-          statusEl.textContent = 'Записываю звук начала…';
+          try {
+            statusEl.textContent = 'Распознаю речь (прямая загрузка аудио)…';
+            const asrRes = await asrRecognizeUrl(directUrl, headTo, tailFrom, tailTo);
+            headText = asrRes.headText;
+            tailText = asrRes.tailText;
+            asrSuccess = true;
+          } catch (e) {
+            console.warn('Прямое извлечение аудио не удалось, переключаюсь на запись из плеера:', e);
+          }
+        }
+        if (!asrSuccess) {
+          statusEl.textContent = `Записываю звук хука (0–${headTo.toFixed(1)} с)…`;
           const headB64 = await blobToBase64(await recordRange(video, 0, headTo));
-          statusEl.textContent = 'Записываю звук конца…';
+          statusEl.textContent = `Записываю звук призыва (${tailFrom.toFixed(1)}–${tailTo.toFixed(1)} с)…`;
           const tailB64 = await blobToBase64(await recordRange(video, tailFrom, tailTo));
-          statusEl.textContent = 'Распознаю речь начала…';
+          statusEl.textContent = 'Распознаю речь хука (Whisper)…';
           headText = await asrRecognize(headB64);
-          statusEl.textContent = 'Распознаю речь конца…';
+          statusEl.textContent = 'Распознаю речь призыва (Whisper)…';
           tailText = await asrRecognize(tailB64);
         }
       } else {
-        try {
-          video.pause();
-        } catch (_) {}
-        statusEl.textContent = 'Снимаю кадры начала…';
-        const headFrames = await captureRange(video, 0, headTo);
-        statusEl.textContent = 'Снимаю кадры конца…';
-        const tailFrames = await captureRange(video, tailFrom, tailTo);
-        statusEl.textContent = 'Загружаю движок распознавания (первый раз ~10–15 с)…';
-        headText = compactOcrText(await ocrFrames(headFrames, statusEl, 'начало'));
-        tailText = compactOcrText(await ocrFrames(tailFrames, statusEl, 'конец'));
+        // Текст с экрана (OCR)
+        let directSuccess = false;
+        if (directUrl) {
+          try {
+            statusEl.textContent = 'Скачиваю видео и распознаю кадры…';
+            const headTimestamps = [0.05, 0.8, Math.min(headTo, 2.0)];
+            if (headTo > 3.0) headTimestamps.push(Math.max(0.5, headTo - 0.2));
+
+            const tailDur = tailTo - tailFrom;
+            const tailTimestamps = [
+              tailFrom + Math.min(0.5, tailDur * 0.2),
+              tailFrom + tailDur * 0.6,
+              Math.max(tailFrom, tailTo - 0.2),
+            ];
+
+            const ocrRes = await ocrVideoDirect(directUrl, headTimestamps, tailTimestamps);
+            headText = ocrRes.headText;
+            tailText = ocrRes.tailText;
+            directSuccess = true;
+          } catch (e) {
+            console.warn('Прямое извлечение кадров не удалось, переключаюсь на снимок экрана:', e);
+          }
+        }
+
+        if (!directSuccess) {
+          try {
+            video.pause();
+          } catch (_) {}
+          const headFrames = await captureRange(video, 0, headTo, true, statusEl, 'начала');
+          const tailFrames = await captureRange(video, tailFrom, tailTo, false, statusEl, 'конца');
+          headText = compactOcrText(await ocrFrames(headFrames, statusEl, 'хука'));
+          tailText = compactOcrText(await ocrFrames(tailFrames, statusEl, 'призыва'));
+        }
       }
 
-      const result = `Хук: ${headText || '(текст на видео не найден)'}\nПризыв: ${tailText || '(текст на видео не найден)'}`;
+      const result = `Хук:\n${headText || '(текст на видео не найден)'}\n\nПризыв:\n${tailText || '(текст на видео не найден)'}`;
+      
+      if (resText && resWrap) {
+        resText.value = result;
+        resWrap.style.display = 'block';
+      }
+
       const ok = await copyToClipboard(result);
-      statusEl.textContent = ok ? 'Скопировано в буфер обмена ✓' : 'Не смог скопировать в буфер.';
+      statusEl.textContent = ok
+        ? '✓ Скопировано в буфер обмена!'
+        : 'Текст извлечён! Нажми «📋 Скопировать» ниже.';
     } catch (err) {
       statusEl.textContent = String((err && err.message) || err);
     } finally {
@@ -2411,7 +2914,7 @@
             <input type="checkbox" class="igx-chk-autoopen" checked />
             Автооткрывать ТГ при проверке
           </label>
-          <button type="button" class="igx-btn-ocr" title="Извлечь из самого видимого видео хук (первые секунды) и призыв (последние секунды) — текстом с экрана или речью из звука, и скопировать в буфер">📝 Хук и призыв из видео</button>
+          <button type="button" class="igx-btn-ocr" title="Извлечь хук и призыв из видео (секунды) или карусели со слайдами (слайды) и скопировать в буфер">📝 Хук и призыв (видео / слайды)</button>
         </div>
 
         <div class="igx-side-section">

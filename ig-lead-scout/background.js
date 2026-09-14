@@ -52,7 +52,7 @@ async function ensureOcrDoc() {
     try {
       await chrome.offscreen.createDocument({
         url: 'ocr-offscreen.html',
-        reasons: ['WORKERS'],
+        reasons: ['WORKERS', 'BLOBS', 'AUDIO_PLAYBACK'],
         justification: 'Распознавание текста и речи с видео Инстаграма',
       });
     } catch (e) {
@@ -148,7 +148,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || !msg.type) return false;
 
   // ocr-offscreen.js обрабатывает эти типы — background НЕ должен перехватывать
-  if (msg.type === 'ocrPing' || msg.type === 'ocrDo' || msg.type === 'asrDo' || msg.type === 'asrDoUrl') return false;
+  if (msg.type === 'ocrPing' || msg.type === 'ocrDo' || msg.type === 'ocrImageUrl' || msg.type === 'ocrVideoDo' || msg.type === 'asrDo' || msg.type === 'asrDoUrl') return false;
 
   // Снимок вкладки для видео с CORS-защитой (когда canvas.toDataURL блокируется браузером)
   if (msg.type === 'captureTab') {
@@ -181,16 +181,37 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  // Распознавание текста (OCR) и речи (ASR) с видео — в offscreen-документе.
-  if (msg.type === 'ocrRecognize' || msg.type === 'asrRecognize' || msg.type === 'asrRecognizeUrl') {
+  // Распознавание текста (OCR) и речи (ASR) с видео/слайдов — в offscreen-документе.
+  if (
+    msg.type === 'ocrRecognize' ||
+    msg.type === 'ocrRecognizeUrl' ||
+    msg.type === 'ocrVideoDirect' ||
+    msg.type === 'asrRecognize' ||
+    msg.type === 'asrRecognizeUrl'
+  ) {
     let payload;
     if (msg.type === 'ocrRecognize') payload = { type: 'ocrDo', image: msg.image };
+    else if (msg.type === 'ocrRecognizeUrl') payload = { type: 'ocrImageUrl', url: msg.url };
+    else if (msg.type === 'ocrVideoDirect')
+      payload = {
+        type: 'ocrVideoDo',
+        url: msg.url,
+        headTimestamps: msg.headTimestamps,
+        tailTimestamps: msg.tailTimestamps,
+      };
     else if (msg.type === 'asrRecognize') payload = { type: 'asrDo', audio: msg.audio };
-    else payload = { type: 'asrDoUrl', url: msg.url, headTo: msg.headTo, tailFrom: msg.tailFrom, tailTo: msg.tailTo };
+    else
+      payload = {
+        type: 'asrDoUrl',
+        url: msg.url,
+        headTo: msg.headTo,
+        tailFrom: msg.tailFrom,
+        tailTo: msg.tailTo,
+      };
 
     offscreenCall(payload)
-      .then((r) => sendResponse(r || { error: 'Распознавалка не ответила.' }))
-      .catch((e) => sendResponse({ error: String((e && e.message) || e) }));
+      .then((r) => sendResponse(r || { ok: false, error: 'Распознавалка не ответила.' }))
+      .catch((e) => sendResponse({ ok: false, error: String((e && e.message) || e) }));
     return true;
   }
 
