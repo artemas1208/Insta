@@ -27,7 +27,9 @@
     "https://t.me/*",
     "https://telegram.me/*",
     "https://web.telegram.org/*",
-    "https://www.instagram.com/*"
+    "https://www.instagram.com/*",
+    "https://api.groq.com/*",
+    "https://api.openai.com/*"
   ],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"

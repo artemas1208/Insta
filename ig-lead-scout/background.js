@@ -199,7 +199,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         headTimestamps: msg.headTimestamps,
         tailTimestamps: msg.tailTimestamps,
       };
-    else if (msg.type === 'asrRecognize') payload = { type: 'asrDo', audio: msg.audio };
+    else if (msg.type === 'asrRecognize') payload = { type: 'asrDo', audio: msg.audio, apiKey: msg.apiKey };
     else
       payload = {
         type: 'asrDoUrl',
@@ -207,6 +207,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         headTo: msg.headTo,
         tailFrom: msg.tailFrom,
         tailTo: msg.tailTo,
+        apiKey: msg.apiKey,
       };
 
     offscreenCall(payload)
