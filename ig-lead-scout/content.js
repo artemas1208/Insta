@@ -973,6 +973,7 @@
   const OCR_START_SLIDES_KEY = 'igx_ocr_start_slides';
   const OCR_END_SLIDES_KEY = 'igx_ocr_end_slides';
   const OCR_APIKEY_KEY = 'igx_ocr_apikey';
+  const OCR_VIDEO_FPS_KEY = 'igx_ocr_video_fps';
   let igxOcrPop = null;
   let igxActiveMediaType = 'video'; // 'video' или 'carousel'
 
@@ -1181,31 +1182,58 @@
     });
   }
 
-  function getRangeTimestamps(from, to, isHead) {
-    const dur = Math.max(0.2, to - from);
-    const count = Math.min(5, Math.max(3, Math.floor(dur / 2.0)));
-    const step = dur / (count + 1);
+  function getRangeTimestamps(from, to, fpsLevel) {
+    const dur = Math.max(0.1, to - from);
+    const stepMap = {
+      1: 2.5,
+      2: 1.5,
+      3: 1.0,
+      4: 0.5,
+      5: 0.3,
+    };
+    const step = stepMap[fpsLevel] || 1.0;
     const timestamps = [];
-    for (let i = 1; i <= count; i++) {
-      timestamps.push(Math.round((from + step * i) * 10) / 10);
+
+    // Первый кадр в начале диапазона
+    const first = Math.round((from + 0.1) * 10) / 10;
+    timestamps.push(first);
+
+    let cur = from + step;
+    while (cur < to - 0.05) {
+      timestamps.push(Math.round(cur * 10) / 10);
+      cur += step;
     }
-    return Array.from(new Set(timestamps));
+
+    const last = Math.round(Math.max(from + 0.1, to - 0.1) * 10) / 10;
+    if (!timestamps.includes(last)) timestamps.push(last);
+
+    return Array.from(new Set(timestamps)).sort((a, b) => a - b);
   }
 
-  async function captureRange(video, from, to, isHead, statusEl, label) {
+  async function captureRange(video, from, to, fpsLevel, statusEl, label) {
     const frames = [];
-    const timestamps = getRangeTimestamps(from, to, isHead);
+    const timestamps = getRangeTimestamps(from, to, fpsLevel);
 
-    // Временно скрываем оверлей паузы Instagram поверх видео, чтобы он не закрывал субтитры
+    try {
+      video.scrollIntoView?.({ block: 'center', behavior: 'instant' });
+    } catch (_) {}
+
+    // Временно скрываем оверлей паузы/воспроизведения Instagram поверх видео
     const scope = video.closest('article, [role="dialog"], div._aatk') || document.body;
     const playIcons = scope.querySelectorAll(
-      'svg[aria-label="Play"], svg[aria-label="Воспроизвести"], div[role="button"]:has(svg[aria-label*="Play"])'
+      'svg[aria-label="Play"], svg[aria-label="Воспроизвести"], [aria-label*="Play"], [aria-label*="Воспроизвести"], div._9zs5, div._aae-'
     );
+    const hiddenEls = [];
     playIcons.forEach((el) => {
-      el.style.opacity = '0';
+      const b = el.closest('button, [role="button"]') || el;
+      if (b && b.style.display !== 'none') {
+        b.style.display = 'none';
+        hiddenEls.push(b);
+      }
     });
 
     try {
+      let lastFrame = null;
       for (let i = 0; i < timestamps.length; i++) {
         const t = timestamps[i];
         if (statusEl) {
@@ -1220,11 +1248,14 @@
             console.warn('captureVideoViaTab failed:', err);
           }
         }
-        if (frame) frames.push(frame);
+        if (frame && frame !== lastFrame) {
+          frames.push(frame);
+          lastFrame = frame;
+        }
       }
     } finally {
-      playIcons.forEach((el) => {
-        el.style.opacity = '';
+      hiddenEls.forEach((el) => {
+        el.style.display = '';
       });
     }
     return frames;
@@ -1282,31 +1313,52 @@
     return best;
   }
 
-  // Поиск строго медиа-контейнера поста (исключая внешние диалоговые стрелки переключения постов)
+  // Поиск статьи (article) текущего поста
+  function findPostArticle(scope) {
+    const root = scope || document;
+    if (root.tagName === 'ARTICLE') return root;
+    return (
+      root.closest?.('article') ||
+      root.querySelector?.('article') ||
+      document.querySelector('[role="dialog"] article') ||
+      document.querySelector('article') ||
+      document.body
+    );
+  }
+
+  // Поиск медиа-контейнера поста (исключая внутренний scroll-viewport div._acaw!)
   function findMediaContainer(scope) {
-    const root = scope || document.querySelector('[role="dialog"]') || document.querySelector('article') || document.body;
-    const ul = root.querySelector('ul._acay, ul[class*="acay"]');
-    if (ul) return ul.closest('div._aatk, div._aagu, div._acaw, div[class*="media"], article') || ul.parentElement || ul;
-    const tablist = root.querySelector('div[role="tablist"]');
-    if (tablist) return tablist.closest('div._aatk, div._aagu, div._acaw, div[class*="media"], article') || tablist.parentElement;
-    return root.querySelector('div._aatk, div._aagu, div._acaw, div[class*="media"], article') || root;
+    const article = findPostArticle(scope);
+    const ul = article.querySelector('ul._acay, ul[class*="acay"]');
+    if (ul) {
+      // Ищем верхний контейнер div._aatk (где живут и стрелки, и точки), а НЕ div._acaw
+      const topMedia = ul.closest('div._aatk, div._aamw, div[class*="_aatk"]');
+      if (topMedia) return topMedia;
+      return ul.parentElement?.parentElement || article;
+    }
+    const video = article.querySelector('video');
+    if (video) {
+      const topMedia = video.closest('div._aatk, div._aamw, div[class*="_aatk"]');
+      if (topMedia) return topMedia;
+      return video.parentElement?.parentElement || article;
+    }
+    return article.querySelector('div._aatk, div._aamw, div[class*="_aatk"]') || article;
   }
 
   // Определение типа медиа на текущем посте (видео или карусель со слайдами)
   function detectCurrentPostMedia() {
-    const dialog = document.querySelector('[role="dialog"]');
-    const scope = dialog || document.querySelector('article') || document.querySelector('main') || document.body;
-    const mediaContainer = findMediaContainer(scope);
+    const article = findPostArticle();
+    const mediaContainer = findMediaContainer(article);
 
-    const nextBtn = findCarouselNextButton(mediaContainer);
-    const prevBtn = findCarouselPrevButton(mediaContainer);
-    const dots = mediaContainer ? mediaContainer.querySelectorAll('div._acaz, div[role="tablist"] > *, ul._acay > li') : [];
-    const video = (mediaContainer || scope).querySelector('video');
+    const nextBtn = findCarouselNextButton(article);
+    const prevBtn = findCarouselPrevButton(article);
+    const dots = article ? article.querySelectorAll('div._acaz, div[role="tablist"] > *, ul._acay > li') : [];
+    const video = article ? article.querySelector('video') : null;
 
-    if (nextBtn || prevBtn || (dots && dots.length > 1)) {
+    if (nextBtn || prevBtn || (dots && dots.length > 1) || (article && article.querySelector('ul._acay'))) {
       let totalSlides = dots ? dots.length : 0;
-      if (totalSlides <= 1 && mediaContainer) {
-        const textIndicators = mediaContainer.innerText.match(/(\d+)\s*(?:\/|из|of)\s*(\d+)/i);
+      if (totalSlides <= 1 && article) {
+        const textIndicators = article.innerText.match(/(\d+)\s*(?:\/|из|of)\s*(\d+)/i);
         if (textIndicators && textIndicators[2]) {
           totalSlides = parseInt(textIndicators[2], 10);
         }
@@ -1314,7 +1366,7 @@
       return {
         type: 'carousel',
         totalSlides: Math.max(2, totalSlides || 10),
-        scope: mediaContainer || scope,
+        scope: article,
         video,
       };
     }
@@ -1323,7 +1375,7 @@
       return {
         type: 'video',
         video,
-        scope,
+        scope: article,
       };
     }
 
@@ -1402,67 +1454,66 @@
     return true;
   }
 
-  // Поиск кнопки «Далее» СТРОГО внутри медиа-контейнера карусели
+  // Поиск кнопки «Далее» СТРОГО внутри публикации (article)
   function findCarouselNextButton(scope) {
-    const root = scope || document;
-    const mediaContainer = findMediaContainer(root);
-    if (!mediaContainer) return null;
-    const mRect = mediaContainer.getBoundingClientRect();
-
-    const isInside = (el) => {
-      if (!el) return false;
-      const r = el.getBoundingClientRect();
-      if (r.width <= 0 || r.height <= 0) return false;
-      const cx = r.left + r.width / 2;
-      const cy = r.top + r.height / 2;
-      return cx >= mRect.left - 30 && cx <= mRect.right + 40 && cy >= mRect.top - 30 && cy <= mRect.bottom + 30;
-    };
+    const article = findPostArticle(scope);
+    if (!article) return null;
+    const mediaContainer = findMediaContainer(article);
+    const mRect = (mediaContainer || article).getBoundingClientRect();
 
     const selectors = [
       'button[aria-label="Next"]',
       'button[aria-label="Далее"]',
       'button[aria-label="Next slide"]',
       'button[aria-label="Следующий слайд"]',
+      'button[aria-label="Вперед"]',
       'button[aria-label*="Next"]',
       'button[aria-label*="Далее"]',
       'button[aria-label*="Следующ"]',
       'button[aria-label*="Вперед"]',
+      'div._aaqg._aaqh button',
+      'div._aaqh button',
+      'div._aaqg button',
+      'button._afxw, button[class*="afxw"]',
       'div[role="button"][aria-label*="Next"]',
       'div[role="button"][aria-label*="Далее"]',
-      'button._afxw, button[class*="afxw"]',
     ];
+
     for (const sel of selectors) {
-      const list = Array.from(mediaContainer.querySelectorAll(sel)).filter(isElementVisible).filter(isInside);
-      if (list.length > 0) {
-        return list.sort((a, b) => b.getBoundingClientRect().left - a.getBoundingClientRect().left)[0];
+      const list = Array.from(article.querySelectorAll(sel)).filter(isElementVisible);
+      for (const b of list) {
+        const br = b.getBoundingClientRect();
+        // Кнопка Далее находится справа от центра медиа
+        if (br.left >= mRect.left + mRect.width * 0.35 && br.left <= mRect.right + 70) {
+          return b;
+        }
       }
     }
 
-    const svgs = Array.from(mediaContainer.querySelectorAll('svg')).filter(isInside);
+    const svgs = Array.from(article.querySelectorAll('svg')).filter(isElementVisible);
     for (const svg of svgs) {
       const label = (svg.getAttribute('aria-label') || '').toLowerCase();
       const title = (svg.querySelector('title')?.textContent || '').toLowerCase();
-      if (
+      const isNextLabel =
         label.includes('далее') ||
         label.includes('next') ||
         label.includes('следующ') ||
         label.includes('вперед') ||
         title.includes('далее') ||
         title.includes('next') ||
-        title.includes('следующ')
-      ) {
-        const btn = svg.closest('button, [role="button"]') || svg.parentElement;
-        if (btn && isElementVisible(btn) && isInside(btn)) return btn;
-      }
-    }
+        title.includes('следующ');
 
-    for (const svg of svgs) {
       const poly = svg.querySelector('polyline');
-      if (poly) {
-        const pts = poly.getAttribute('points') || '';
-        if (pts.includes('19.84') || pts.includes('22.565') || pts.includes('9.276')) {
-          const btn = svg.closest('button, [role="button"]') || svg.parentElement;
-          if (btn && isElementVisible(btn) && isInside(btn)) return btn;
+      const pts = poly ? (poly.getAttribute('points') || '') : '';
+      const isChevronRight = pts.includes('19.84') || pts.includes('22.565') || pts.includes('9.276');
+
+      if (isNextLabel || isChevronRight) {
+        const btn = svg.closest('button, [role="button"]') || svg.parentElement;
+        if (btn && isElementVisible(btn)) {
+          const br = btn.getBoundingClientRect();
+          if (br.left >= mRect.left + mRect.width * 0.35 && br.left <= mRect.right + 70) {
+            return btn;
+          }
         }
       }
     }
@@ -1470,82 +1521,96 @@
     return null;
   }
 
-  // Поиск кнопки «Назад» СТРОГО внутри медиа-контейнера карусели
+  // Поиск кнопки «Назад» СТРОГО внутри публикации (article)
   function findCarouselPrevButton(scope) {
-    const root = scope || document;
-    const mediaContainer = findMediaContainer(root);
-    if (!mediaContainer) return null;
-    const mRect = mediaContainer.getBoundingClientRect();
-
-    const isInside = (el) => {
-      if (!el) return false;
-      const r = el.getBoundingClientRect();
-      if (r.width <= 0 || r.height <= 0) return false;
-      const cx = r.left + r.width / 2;
-      const cy = r.top + r.height / 2;
-      return cx >= mRect.left - 40 && cx <= mRect.right + 30 && cy >= mRect.top - 30 && cy <= mRect.bottom + 30;
-    };
+    const article = findPostArticle(scope);
+    if (!article) return null;
+    const mediaContainer = findMediaContainer(article);
+    const mRect = (mediaContainer || article).getBoundingClientRect();
 
     const selectors = [
       'button[aria-label="Previous"]',
       'button[aria-label="Назад"]',
-      'button[aria-label="Go back"]',
+      'button[aria-label="Previous slide"]',
+      'button[aria-label="Предыдущий слайд"]',
       'button[aria-label*="Previous"]',
       'button[aria-label*="Назад"]',
       'button[aria-label*="Back"]',
+      'div._aaqi button',
+      'button._afxw, button[class*="afxw"]',
       'div[role="button"][aria-label*="Previous"]',
       'div[role="button"][aria-label*="Назад"]',
-      'button._afxw, button[class*="afxw"]',
     ];
+
     for (const sel of selectors) {
-      const list = Array.from(mediaContainer.querySelectorAll(sel)).filter(isElementVisible).filter(isInside);
-      if (list.length > 0) {
-        return list.sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left)[0];
+      const list = Array.from(article.querySelectorAll(sel)).filter(isElementVisible);
+      for (const b of list) {
+        const br = b.getBoundingClientRect();
+        // Кнопка Назад находится слева от центра медиа
+        if (br.left <= mRect.left + mRect.width * 0.65 && br.left >= mRect.left - 70) {
+          return b;
+        }
       }
     }
 
-    const svgs = Array.from(mediaContainer.querySelectorAll('svg')).filter(isInside);
+    const svgs = Array.from(article.querySelectorAll('svg')).filter(isElementVisible);
     for (const svg of svgs) {
       const label = (svg.getAttribute('aria-label') || '').toLowerCase();
       const title = (svg.querySelector('title')?.textContent || '').toLowerCase();
-      if (
+      const isPrevLabel =
         label.includes('назад') ||
         label.includes('previous') ||
         label.includes('back') ||
+        label.includes('предыдущ') ||
         title.includes('назад') ||
-        title.includes('previous')
-      ) {
+        title.includes('previous');
+
+      const poly = svg.querySelector('polyline');
+      const pts = poly ? (poly.getAttribute('points') || '') : '';
+      const isChevronLeft = pts.includes('16.564') || pts.includes('6 12');
+
+      if (isPrevLabel || isChevronLeft) {
         const btn = svg.closest('button, [role="button"]') || svg.parentElement;
-        if (btn && isElementVisible(btn) && isInside(btn)) return btn;
+        if (btn && isElementVisible(btn)) {
+          const br = btn.getBoundingClientRect();
+          if (br.left <= mRect.left + mRect.width * 0.65 && br.left >= mRect.left - 70) {
+            return btn;
+          }
+        }
       }
     }
 
     return null;
   }
 
-  // Получение активного/видимого изображения слайда
+  // Получение активного/видимого изображения текущего слайда
   function getVisibleSlideElement(scope) {
-    const root = scope || document;
+    const article = findPostArticle(scope);
+    // ВАЖНО: измеряем расстояние относительно НЕПОДВИЖНОГО вьюпорта (div._aatk или article),
+    // а НЕ ul._acay, который сдвигается CSS-трансформацией!
+    const viewport =
+      article.querySelector('div._aatk, div._aamw, div._acaw') ||
+      findMediaContainer(article) ||
+      article;
+    const vRect = viewport.getBoundingClientRect();
+    const vCenter = vRect.left + vRect.width / 2;
+
     const imgs = Array.from(
-      root.querySelectorAll('article img, [role="dialog"] img, ul img, div._aagv img, img[src*="cdninstagram"], img[src*="fbcdn"]')
+      article.querySelectorAll('ul._acay img, div._acaw img, div._aatk img, article img, div._aagv img, img[src*="cdninstagram"], img[src*="fbcdn"]')
     ).filter((img) => {
       const r = img.getBoundingClientRect();
-      return r.width > 180 && r.height > 180;
+      return r.width > 120 && r.height > 120;
     });
 
     if (imgs.length === 0) {
-      return root.querySelector('video') || root.querySelector('img');
+      return article.querySelector('video') || article.querySelector('img');
     }
-
-    const container = root.querySelector('ul._acay, div._acaw, div._aatk, article') || root;
-    const cRect = container.getBoundingClientRect();
-    const cCenter = cRect.left + cRect.width / 2;
 
     imgs.sort((a, b) => {
       const ra = a.getBoundingClientRect();
       const rb = b.getBoundingClientRect();
-      const distA = Math.abs(ra.left + ra.width / 2 - cCenter);
-      const distB = Math.abs(rb.left + rb.width / 2 - cCenter);
+      const distA = Math.abs(ra.left + ra.width / 2 - vCenter);
+      const distB = Math.abs(rb.left + rb.width / 2 - vCenter);
       return distA - distB;
     });
 
@@ -1555,13 +1620,13 @@
   // Извлечение текста со слайдов карусели
   async function extractCarouselSlides(postMedia, startCount, endCount, apiKey, statusEl) {
     const scope = postMedia.scope || document;
-    const mediaContainer = findMediaContainer(scope);
+    const article = findPostArticle(scope);
     const initialUrl = window.location.href;
 
     // 1. Отматываем карусель назад до 1-го слайда
     if (statusEl) statusEl.textContent = 'Перехожу к началу слайдов…';
-    for (let step = 0; step < 20; step++) {
-      const prev = findCarouselPrevButton(mediaContainer);
+    for (let step = 0; step < 25; step++) {
+      const prev = findCarouselPrevButton(article);
       if (!prev) break;
       clickElement(prev);
       await new Promise((r) => setTimeout(r, 200));
@@ -1570,28 +1635,24 @@
 
     // Проверяем, сколько слайдов видно в индикаторах
     let detectedTotal = 0;
-    if (mediaContainer) {
-      const dots = mediaContainer.querySelectorAll('div[role="tablist"] > *, div._acaz, div[class*="acaz"]');
-      if (dots.length > 1) detectedTotal = dots.length;
-      const m = mediaContainer.innerText.match(/(\d+)\s*(?:\/|из|of)\s*(\d+)/i);
-      if (m && m[2]) {
-        const fromBadge = parseInt(m[2], 10);
-        if (fromBadge > detectedTotal) detectedTotal = fromBadge;
-      }
+    const dots = article.querySelectorAll('div[role="tablist"] > *, div._acaz, div[class*="acaz"]');
+    if (dots.length > 1) detectedTotal = dots.length;
+    const m = article.innerText.match(/(\d+)\s*(?:\/|из|of)\s*(\d+)/i);
+    if (m && m[2]) {
+      const fromBadge = parseInt(m[2], 10);
+      if (fromBadge > detectedTotal && fromBadge <= 30) detectedTotal = fromBadge;
     }
+    const lis = article.querySelectorAll('ul._acay > li');
+    if (lis.length > detectedTotal) detectedTotal = lis.length;
 
     const captured = {};
     let actualTotal = 0;
     const scanLimit = detectedTotal > 0 ? detectedTotal : 25;
 
     for (let cur = 1; cur <= scanLimit; cur++) {
-      // Защита от смены поста в ленте Instagram
-      if (window.location.href !== initialUrl) {
-        console.warn('URL страницы сменился во время обхода слайдов, прерываем.');
-        break;
-      }
+      if (window.location.href !== initialUrl) break;
 
-      const el = getVisibleSlideElement(mediaContainer || scope);
+      const el = getVisibleSlideElement(article);
       const curSrc = el ? (el.currentSrc || el.src) : null;
 
       if (statusEl) statusEl.textContent = `Захватываю слайд ${cur}…`;
@@ -1612,23 +1673,28 @@
         break;
       }
 
-      // Проверяем наличие кнопки «Далее» СТРОГО внутри mediaContainer
-      const nextBtn = findCarouselNextButton(mediaContainer);
-      if (!nextBtn) {
-        // Кнопки «Далее» больше нет — достигнут последний слайд карусели!
+      // Ищем кнопку «Далее» строго внутри текущего поста
+      const nextBtn = findCarouselNextButton(article);
+      const dotButtons = Array.from(article.querySelectorAll('div[role="tablist"] > *, div._acaz'));
+
+      if (!nextBtn && (!dotButtons[cur] || cur >= dotButtons.length)) {
+        // Кнопки «Далее» больше нет и точек больше нет — достигнут конец карусели!
         break;
       }
 
-      // Листаем на следующий слайд
       if (statusEl) statusEl.textContent = `Перелистываю на слайд ${cur + 1}…`;
-      clickElement(nextBtn);
+      if (nextBtn) {
+        clickElement(nextBtn);
+      } else if (dotButtons[cur]) {
+        clickElement(dotButtons[cur]);
+      }
 
-      // Ждём смены изображения в DOM
+      // Ждём смены видимого изображения в DOM
       let changed = false;
-      for (let wait = 0; wait < 8; wait++) {
+      for (let wait = 0; wait < 10; wait++) {
         await new Promise((r) => setTimeout(r, 180));
         if (window.location.href !== initialUrl) break;
-        const newEl = getVisibleSlideElement(mediaContainer || scope);
+        const newEl = getVisibleSlideElement(article);
         const newSrc = newEl ? (newEl.currentSrc || newEl.src) : null;
         if (newSrc && newSrc !== curSrc) {
           changed = true;
@@ -1636,21 +1702,22 @@
         }
       }
 
-      // Запасной вариант: клик по точке tablist
-      if (!changed && mediaContainer) {
-        const dots = Array.from(mediaContainer.querySelectorAll('div[role="tablist"] > *, div._acaz'));
-        if (dots[cur]) {
-          clickElement(dots[cur]);
-          await new Promise((r) => setTimeout(r, 250));
-          const newEl = getVisibleSlideElement(mediaContainer || scope);
+      // Запасной вариант: клик по следующей точке
+      if (!changed && dotButtons[cur]) {
+        clickElement(dotButtons[cur]);
+        for (let wait = 0; wait < 8; wait++) {
+          await new Promise((r) => setTimeout(r, 180));
+          if (window.location.href !== initialUrl) break;
+          const newEl = getVisibleSlideElement(article);
           const newSrc = newEl ? (newEl.currentSrc || newEl.src) : null;
           if (newSrc && newSrc !== curSrc) {
             changed = true;
+            break;
           }
         }
       }
 
-      // Если слайд не сменился и кнопки нет — это конец карусели
+      // Если слайд не сменился — это конец карусели
       if (!changed) {
         break;
       }
@@ -1688,15 +1755,14 @@
       try {
         const txt = await ocrItem(captured[s]);
         const clean = compactOcrText(txt);
-        if (clean) {
-          headTexts.push(`Слайд ${s}:\n${clean}`);
-        }
+        headTexts.push(clean ? `Слайд ${s}:\n${clean}` : `Слайд ${s}:\n(нет текста)`);
       } catch (e) {
         console.warn(`Ошибка OCR слайда ${s}:`, e);
+        headTexts.push(`Слайд ${s}:\n(ошибка распознавания)`);
       }
     }
     if (headTexts.length === 0) {
-      headTexts.push(headSlides.length === 1 ? `Слайд ${headSlides[0]}:\n(нет текста)` : '(текст на слайдах не найден)');
+      headTexts.push('(текст на слайдах не найден)');
     }
 
     const tailTexts = [];
@@ -1705,15 +1771,14 @@
       try {
         const txt = await ocrItem(captured[s]);
         const clean = compactOcrText(txt);
-        if (clean) {
-          tailTexts.push(`Слайд ${s}:\n${clean}`);
-        }
+        tailTexts.push(clean ? `Слайд ${s}:\n${clean}` : `Слайд ${s}:\n(нет текста)`);
       } catch (e) {
         console.warn(`Ошибка OCR слайда ${s}:`, e);
+        tailTexts.push(`Слайд ${s}:\n(ошибка распознавания)`);
       }
     }
     if (tailTexts.length === 0) {
-      tailTexts.push(tailSlides.length === 1 ? `Слайд ${tailSlides[0]}:\n(нет текста)` : '(текст на слайдах не найден)');
+      tailTexts.push('(текст на слайдах не найден)');
     }
 
     return {
@@ -1725,7 +1790,6 @@
     };
   }
 
-  // Запись звука из куска видео в плеере
   async function recordRange(video, from, to) {
     if (typeof video.captureStream !== 'function' && typeof video.mozCaptureStream !== 'function') {
       throw new Error('Браузер не даёт захватить звук из этого видео.');
@@ -1928,6 +1992,20 @@
       '<label title="Распознаёт надписи на кадрах"><input type="radio" name="igx-ocr-mode" value="text" checked> Текст с экрана</label>' +
       '<label title="Распознаёт речь из звука"><input type="radio" name="igx-ocr-mode" value="audio"> Речь из звука</label>' +
       '</div>' +
+      '<div class="igx-ocr-fps-wrap" style="margin-top:6px; padding:6px 10px; background:rgba(255,255,255,0.04); border-radius:6px; border:1px solid rgba(255,255,255,0.08);">' +
+      '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">' +
+      '<span style="font-size:11px; color:#cbd5e1; font-weight:600;">🎯 Частота анализа кадров:</span>' +
+      '<span class="igx-ocr-fps-label" style="font-size:11px; color:#38bdf8; font-weight:700;">1 кадр / 1.0 с</span>' +
+      '</div>' +
+      '<input type="range" class="igx-ocr-fps-slider" min="1" max="5" step="1" value="3" style="width:100%; accent-color:#38bdf8; cursor:pointer;" />' +
+      '<div style="display:flex; justify-content:space-between; font-size:9px; color:#64748b; margin-top:2px;">' +
+      '<span>2.5с (быстро)</span>' +
+      '<span>1.5с</span>' +
+      '<span>1.0с (норма)</span>' +
+      '<span>0.5с</span>' +
+      '<span>0.3с (макс)</span>' +
+      '</div>' +
+      '</div>' +
       '<div class="igx-ocr-badge igx-ocr-slide-note" style="display:none;">На слайдах текст распознаётся со слайдов</div>' +
       '<details class="igx-ocr-api-details" style="margin-top: 8px; margin-bottom: 8px; font-size: 11px; color: #8fa3b8; cursor: pointer;">' +
       '<summary style="outline: none; user-select: none; font-weight: 600;">⚡ Ключ Groq API (бесплатно, точность 100% Premiere)</summary>' +
@@ -1983,6 +2061,38 @@
     apiKeyInput.addEventListener('input', saveApiKey);
     apiKeyInput.addEventListener('change', saveApiKey);
 
+    const fpsWrap = pop.querySelector('.igx-ocr-fps-wrap');
+    const fpsSlider = pop.querySelector('.igx-ocr-fps-slider');
+    const fpsLabel = pop.querySelector('.igx-ocr-fps-label');
+    const fpsLabels = {
+      1: '1 кадр / 2.5 с (быстро)',
+      2: '1 кадр / 1.5 с',
+      3: '1 кадр / 1.0 с (рекомендуется)',
+      4: '2 кадра / с (высокая)',
+      5: '3 кадра / с (максимальная)',
+    };
+
+    if (fpsSlider) {
+      fpsSlider.addEventListener('input', () => {
+        const lvl = parseInt(fpsSlider.value, 10) || 3;
+        if (fpsLabel) fpsLabel.textContent = fpsLabels[lvl] || '1 кадр / 1.0 с';
+        chrome.storage.local.set({ [OCR_VIDEO_FPS_KEY]: lvl });
+      });
+      chrome.storage.local.get([OCR_VIDEO_FPS_KEY]).then((d) => {
+        const lvl = (d && d[OCR_VIDEO_FPS_KEY]) || 3;
+        fpsSlider.value = lvl;
+        if (fpsLabel) fpsLabel.textContent = fpsLabels[lvl] || '1 кадр / 1.0 с';
+      });
+    }
+
+    function updateFpsVisibility() {
+      const isVideo = igxActiveMediaType === 'video';
+      const curMode = (pop.querySelector('input[name="igx-ocr-mode"]:checked')?.value) || 'text';
+      if (fpsWrap) {
+        fpsWrap.style.display = (isVideo && curMode === 'text') ? 'block' : 'none';
+      }
+    }
+
     ['pointerdown', 'mousedown', 'click'].forEach((ev) => {
       pop.addEventListener(ev, (e) => e.stopPropagation());
     });
@@ -2017,17 +2127,29 @@
           pop.querySelector('.igx-ocr-end').value = d[OCR_END_KEY] || 7;
         });
       }
+      updateFpsVisibility();
     }
 
     tabVideo.addEventListener('click', () => setMediaTypeUI('video'));
     tabSlides.addEventListener('click', () => setMediaTypeUI('carousel'));
 
-    chrome.storage.local.get([OCR_START_KEY, OCR_END_KEY, OCR_MODE_KEY]).then((d) => {
+    pop.querySelectorAll('input[name="igx-ocr-mode"]').forEach((r) => {
+      r.addEventListener('change', () => {
+        chrome.storage.local.set({ [OCR_MODE_KEY]: r.value });
+        updateFpsVisibility();
+      });
+    });
+
+    chrome.storage.local.get([OCR_START_KEY, OCR_END_KEY, OCR_MODE_KEY, OCR_VIDEO_FPS_KEY]).then((d) => {
       pop.querySelector('.igx-ocr-start').value = d[OCR_START_KEY] || 7;
       pop.querySelector('.igx-ocr-end').value = d[OCR_END_KEY] || 7;
       const mode = d[OCR_MODE_KEY] || 'text';
       const radio = pop.querySelector(`input[name="igx-ocr-mode"][value="${mode}"]`);
       if (radio) radio.checked = true;
+      const lvl = d[OCR_VIDEO_FPS_KEY] || 3;
+      if (fpsSlider) fpsSlider.value = lvl;
+      if (fpsLabel) fpsLabel.textContent = fpsLabels[lvl] || '1 кадр / 1.0 с';
+      updateFpsVisibility();
     });
 
     igxOcrPop = pop;
@@ -2150,6 +2272,10 @@
     const mode = modeRadio ? modeRadio.value : 'text';
     chrome.storage.local.set({ [OCR_START_KEY]: startSec, [OCR_END_KEY]: endSec, [OCR_MODE_KEY]: mode });
 
+    const storedData = await chrome.storage.local.get([OCR_APIKEY_KEY, OCR_VIDEO_FPS_KEY]);
+    const apiKey = (storedData && storedData[OCR_APIKEY_KEY]) || '';
+    const fpsLevel = (storedData && storedData[OCR_VIDEO_FPS_KEY]) || 3;
+
     runBtn.disabled = true;
     const wasPlaying = !video.paused;
     const prevTime = video.currentTime;
@@ -2161,8 +2287,6 @@
       let tailText = '';
 
       const directUrl = findVideoUrl(video);
-      const storedKey = await chrome.storage.local.get(OCR_APIKEY_KEY);
-      const apiKey = (storedKey && storedKey[OCR_APIKEY_KEY]) || '';
 
       if (mode === 'audio') {
         let asrSuccess = false;
@@ -2188,30 +2312,13 @@
           tailText = await asrRecognize(tailB64, apiKey);
         }
       } else {
-        // Текст с экрана (OCR кадров)
-        let directSuccess = false;
-        if (directUrl) {
-          try {
-            statusEl.textContent = apiKey ? 'Распознаю текст на видео (Vision AI)…' : 'Распознаю текст на видео…';
-            const headTimestamps = getRangeTimestamps(0, headTo, true);
-            const tailTimestamps = getRangeTimestamps(tailFrom, tailTo, false);
-            const res = await ocrVideoDirect(directUrl, headTimestamps, tailTimestamps, apiKey);
-            if (res && (res.headText || res.tailText)) {
-              headText = res.headText;
-              tailText = res.tailText;
-              directSuccess = true;
-            }
-          } catch (e) {
-            console.warn('ocrVideoDirect не удался, пробуем захват с экрана:', e);
-          }
-        }
+        // Текст с экрана (OCR кадров с выбранной частотой)
+        statusEl.textContent = apiKey ? 'Снимаю кадры видео и распознаю текст (Vision AI)…' : 'Снимаю кадры видео и распознаю текст…';
+        const headFrames = await captureRange(video, 0, headTo, fpsLevel, statusEl, 'начала');
+        const tailFrames = await captureRange(video, tailFrom, tailTo, fpsLevel, statusEl, 'конца');
 
-        if (!directSuccess) {
-          const headFrames = await captureRange(video, 0, headTo, true, statusEl, 'начала');
-          const tailFrames = await captureRange(video, tailFrom, tailTo, false, statusEl, 'конца');
-          headText = compactOcrText(await ocrFrames(headFrames, apiKey, statusEl, 'хука'));
-          tailText = compactOcrText(await ocrFrames(tailFrames, apiKey, statusEl, 'призыва'));
-        }
+        headText = compactOcrText(await ocrFrames(headFrames, apiKey, statusEl, 'хука'));
+        tailText = compactOcrText(await ocrFrames(tailFrames, apiKey, statusEl, 'призыва'));
 
         // Если OCR не нашёл текст на кадрах, проверяем встроенные DOM-субтитры Instagram
         if (!headText) {
@@ -2248,8 +2355,7 @@
     }
   }
 
-
-    const observer = new MutationObserver((mutations) => {
+  const observer = new MutationObserver((mutations) => {
     let hasNewNodes = false;
     for (const m of mutations) {
       if (m.type === 'childList' && m.addedNodes.length > 0) {
