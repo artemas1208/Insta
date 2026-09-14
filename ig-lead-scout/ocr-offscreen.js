@@ -35,9 +35,70 @@ function getTWorker() {
   return tWorkerPromise;
 }
 
+// Предобработка изображения: увеличение резкости и контрастности (grayscale + contrast stretch)
+// для надёжного распознавания субтитров и надписей на динамическом фоне видео
+async function preprocessForOcr(imageSource) {
+  try {
+    let imgBitmap = null;
+    if (imageSource instanceof Blob) {
+      imgBitmap = await createImageBitmap(imageSource);
+    } else if (typeof imageSource === 'string' && imageSource.startsWith('data:')) {
+      const resp = await fetch(imageSource);
+      const b = await resp.blob();
+      imgBitmap = await createImageBitmap(b);
+    }
+
+    if (!imgBitmap) return imageSource;
+
+    const origW = imgBitmap.width;
+    const origH = imgBitmap.height;
+    // Оптимальный масштаб: Tesseract лучше всего читает при высоте строки ~35-50px
+    const scale = Math.max(1.0, Math.min(2.0, 1600 / Math.max(origW, origH)));
+    const cnv = document.createElement('canvas');
+    cnv.width = Math.round(origW * scale);
+    cnv.height = Math.round(origH * scale);
+    const ctx = cnv.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(imgBitmap, 0, 0, cnv.width, cnv.height);
+
+    const imgData = ctx.getImageData(0, 0, cnv.width, cnv.height);
+    const d = imgData.data;
+    let min = 255;
+    let max = 0;
+
+    for (let i = 0; i < d.length; i += 4) {
+      // Стандартная яркость Rec. 601
+      const g = (d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8;
+      d[i] = g;
+      d[i + 1] = g;
+      d[i + 2] = g;
+      if (g < min) min = g;
+      if (g > max) max = g;
+    }
+
+    const range = max - min;
+    // Растягиваем динамический диапазон для максимальной читаемости букв
+    if (range > 20 && range < 235) {
+      const factor = 255 / range;
+      for (let i = 0; i < d.length; i += 4) {
+        const val = Math.min(255, Math.max(0, (d[i] - min) * factor));
+        d[i] = val;
+        d[i + 1] = val;
+        d[i + 2] = val;
+      }
+      ctx.putImageData(imgData, 0, 0);
+    }
+
+    return cnv;
+  } catch (err) {
+    console.warn('OCR preprocessing fallback:', err);
+    return imageSource;
+  }
+}
+
 async function doOcr(imageSource) {
   const w = await getTWorker();
-  const res = await w.recognize(imageSource);
+  const processed = await preprocessForOcr(imageSource);
+  const res = await w.recognize(processed);
   return (res && res.data && res.data.text) ? res.data.text.trim() : '';
 }
 
@@ -49,7 +110,7 @@ function compactText(s) {
     .filter(Boolean)
     .filter((l) => {
       if (l.length <= 1 && !/\d/.test(l)) return false;
-      const key = l.toLowerCase().replace(/\s+/g, " ");
+      const key = l.toLowerCase().replace(/\s+/g, ' ');
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
@@ -125,7 +186,7 @@ async function extractVideoFramesAndOcr(url, headTimestamps, tailTimestamps) {
           }
         };
         const to = setTimeout(fin, 1200);
-        video.addEventListener('seeked', fin);
+        video.addEventListener('seeked', fin, { once: true });
         try {
           video.currentTime = Math.min(Math.max(0.01, (video.duration || 10) - 0.05), Math.max(0.01, t));
         } catch (_) {
@@ -242,7 +303,47 @@ async function getAsrPipe() {
   }
 }
 
-// Пересэмплирование аудиофрагмента в 16 кГц и распознавание через Whisper
+// Очистка текста от галлюцинаций Whisper и повторяющихся слов/фраз при паузах или фоновой музыке
+function cleanWhisperText(text) {
+  if (!text) return '';
+  let str = String(text).trim();
+
+  // Удаление стандартных титров и артефактов тишины
+  str = str.replace(/субтитры\s+(?:делал|сделал|создал|подготовил|перевёл)[^\n\.\,]*/gi, '');
+  str = str.replace(/спасибо\s+за\s+просмотр[^\n\.\,]*/gi, '');
+  str = str.replace(/продолжение\s+следует[^\n\.\,]*/gi, '');
+  str = str.replace(/редактор\s+субтитров[^\n\.\,]*/gi, '');
+
+  // Токенизация и схлопывание повторяющихся слов (например, "было было было было" -> "было")
+  const tokens = str.split(/(\s+)/);
+  const out = [];
+  let lastWord = '';
+  let repeatCount = 0;
+
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (/^\s+$/.test(t)) {
+      if (repeatCount === 0) out.push(t);
+      continue;
+    }
+    const cleanWord = t.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+    if (cleanWord && cleanWord === lastWord) {
+      repeatCount++;
+      continue;
+    } else {
+      lastWord = cleanWord;
+      repeatCount = 0;
+    }
+    out.push(t);
+  }
+
+  let res = out.join('').trim();
+  // Схлопывание 2-4 словных повторяющихся фраз
+  res = res.replace(/(([^\s]+(?:\s+[^\s]+){1,3}))(?:\s+\1){2,}/gi, '$1');
+  return res.trim();
+}
+
+// Пересэмплирование аудиофрагмента в 16 кГц, пик-нормализация громкости и распознавание Whisper
 async function transcribeSegment(audioBuffer, startSec, endSec) {
   const start = Math.max(0, startSec);
   const end = Math.min(audioBuffer.duration, endSec);
@@ -257,10 +358,38 @@ async function transcribeSegment(audioBuffer, startSec, endSec) {
   const rendered = await off.startRendering();
   const pcm = rendered.getChannelData(0);
 
+  // Peak-нормализация: вытягиваем тихий звук до максимальной амплитуды 0.95
+  let maxAmp = 0;
+  for (let i = 0; i < pcm.length; i++) {
+    const v = Math.abs(pcm[i]);
+    if (v > maxAmp) maxAmp = v;
+  }
+  // Если звук практически отсутствует (тишина или фоновый шум)
+  if (maxAmp < 0.005) {
+    return '';
+  }
+  const gain = 0.95 / maxAmp;
+  for (let i = 0; i < pcm.length; i++) {
+    pcm[i] *= gain;
+  }
+
   const pipe = await getAsrPipe();
-  const res = await pipe(pcm, { language: 'russian', task: 'transcribe' });
-  if (Array.isArray(res)) return res.map((r) => (r && r.text) || '').join(' ').trim();
-  return ((res && res.text) || '').trim();
+  const res = await pipe(pcm, {
+    language: 'russian',
+    task: 'transcribe',
+    return_timestamps: false,
+    chunk_length_s: 30,
+    stride_length_s: 5,
+    max_new_tokens: 128,
+    repetition_penalty: 1.35,
+    no_repeat_ngram_size: 3,
+  });
+
+  let raw = '';
+  if (Array.isArray(res)) raw = res.map((r) => (r && r.text) || '').join(' ').trim();
+  else raw = ((res && res.text) || '').trim();
+
+  return cleanWhisperText(raw);
 }
 
 async function recognizeAudioBase64(base64) {
