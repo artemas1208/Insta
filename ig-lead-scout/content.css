@@ -870,3 +870,37 @@
   background: #2e3d4c;
   border-color: #38bdf8;
 }
+.igx-btn-copy-meta {
+  width: 100%;
+  margin-top: 6px;
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #e7edf3;
+  background: #1a222b;
+  border: 1px solid #37424f;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s;
+  text-align: center;
+}
+.igx-btn-copy-meta:hover {
+  background: #25313e;
+  border-color: #38bdf8;
+  color: #38bdf8;
+}
+.igx-ocr-chk-meta-label {
+  display: flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  margin-top: 8px !important;
+  margin-bottom: 6px !important;
+  font-size: 11px !important;
+  color: #cbd5e1 !important;
+  cursor: pointer !important;
+  user-select: none !important;
+}
+.igx-ocr-chk-meta-label input[type="checkbox"] {
+  cursor: pointer !important;
+  accent-color: #38bdf8 !important;
+}

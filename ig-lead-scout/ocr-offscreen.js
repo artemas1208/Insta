@@ -132,13 +132,20 @@ function filterCleanTextLines(data) {
     valid.push(raw);
   }
 
-  // Если после фильтрации осталось меньше 8 букв суммарно — на фото текста нет
-  const totalLetters = valid.join('').replace(/[^\p{L}]/gu, '');
-  if (totalLetters.length < 8) {
+  // Исключаем оверлей таймера плеера Instagram (0:00 / 1:07)
+  const cleanValid = [];
+  for (const line of valid) {
+    if (/^\d{1,2}:\d{2}\s*(?:\/|из|of)\s*\d{1,2}:\d{2}$/.test(line)) continue;
+    cleanValid.push(line);
+  }
+
+  // Если после фильтрации осталось меньше 2 букв суммарно — на фото текста нет
+  const totalLetters = cleanValid.join('').replace(/[^\p{L}]/gu, '');
+  if (totalLetters.length < 2) {
     return '';
   }
 
-  return valid.join('\n').trim();
+  return cleanValid.join('\n').trim();
 }
 
 // Распознавание через Cloud Vision API (Groq Qwen 3.6/3.8 Vision или OpenAI gpt-4o-mini)
@@ -258,20 +265,51 @@ async function doOcr(imageSource, apiKey) {
 }
 
 function compactText(s) {
-  const seen = new Set();
   const input = Array.isArray(s) ? s.join('\n') : String(s || '');
-  return input
+  const rawLines = input
     .split(/\n+/)
     .map((l) => l.trim())
     .filter(Boolean)
     .filter((l) => {
+      if (/^\d{1,2}:\d{2}\s*(?:\/|из|of)\s*\d{1,2}:\d{2}$/.test(l)) return false;
       if (l.length <= 1 && !/[\p{L}\p{N}]/u.test(l)) return false;
-      const key = l.toLowerCase().replace(/\s+/g, ' ');
-      if (seen.has(key)) return false;
-      seen.add(key);
       return true;
-    })
-    .join('\n');
+    });
+
+  const unique = [];
+  const seen = new Set();
+  for (const l of rawLines) {
+    const key = l.toLowerCase().replace(/\s+/g, ' ');
+    if (!seen.has(key)) {
+      seen.add(key);
+      unique.push(l);
+    }
+  }
+
+  // Удаляем строки, которые являются префиксами более длинных строк (артефакты анимации появления текста)
+  const finalLines = [];
+  for (let i = 0; i < unique.length; i++) {
+    const a = unique[i];
+    const aNorm = a.toLowerCase().replace(/\s+/g, ' ');
+    let isSub = false;
+    for (let j = 0; j < unique.length; j++) {
+      if (i === j) continue;
+      const bNorm = unique[j].toLowerCase().replace(/\s+/g, ' ');
+      if (bNorm.length > aNorm.length && bNorm.includes(aNorm)) {
+        isSub = true;
+        break;
+      }
+    }
+    if (!isSub) {
+      const validShort = new Set(['в', 'и', 'с', 'к', 'у', 'о', 'а', 'не', 'на', 'по', 'за', 'из', 'от', 'до', 'об']);
+      if (aNorm.length <= 2 && !validShort.has(aNorm) && !/^\d+$/.test(aNorm)) {
+        continue;
+      }
+      finalLines.push(a);
+    }
+  }
+
+  return finalLines.join('\n');
 }
 
 // Распознавание изображения по прямому URL (для слайдов карусели)
@@ -347,7 +385,7 @@ async function extractVideoFramesAndOcr(url, headTimestamps, tailTimestamps, api
         const to = setTimeout(fin, 1200);
         video.addEventListener('seeked', fin, { once: true });
         try {
-          video.currentTime = Math.min(Math.max(0.01, (video.duration || 10) - 0.05), Math.max(0.01, t));
+          video.currentTime = Math.min(Math.max(0.01, (video.duration || 10) - 0.25), Math.max(0.01, t));
         } catch (_) {
           fin();
         }
