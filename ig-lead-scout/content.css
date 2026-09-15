@@ -613,6 +613,7 @@
   white-space: nowrap;
   user-select: none;
 }
+.igx-seek-copy-meta,
 .igx-seek-ocr {
   background: none;
   border: none;
@@ -625,9 +626,41 @@
   color: #fff;
   line-height: 1;
 }
+.igx-seek-copy-meta:hover,
 .igx-seek-ocr:hover {
   opacity: 1;
   transform: scale(1.18);
+}
+
+/* Панель кнопок на карусели со слайдами */
+.igx-carousel-bar {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  pointer-events: auto;
+}
+.igx-carousel-bar button {
+  background: rgba(15, 20, 26, 0.85);
+  backdrop-filter: blur(8px);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  transition: all 0.15s ease;
+  line-height: 1.2;
+}
+.igx-carousel-bar button:hover {
+  background: #0284c7;
+  border-color: #38bdf8;
+  transform: translateY(-1px);
 }
 
 /* Попап извлечения текста из видео и слайдов */

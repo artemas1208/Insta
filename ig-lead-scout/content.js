@@ -758,6 +758,57 @@
     root.querySelectorAll('video:not([data-igx-seek])').forEach(enhanceVideo);
   }
 
+  // Сканирование каруселей со слайдами (добавляем кнопки извлечения слайдов и копирования данных)
+  function scanForCarousels(root = document) {
+    try {
+      const uls = root.querySelectorAll('ul._acay, ul[class*="acay"]');
+      uls.forEach((ul) => {
+        const container = ul.closest('div._aatk, div._aamw, div[class*="_aatk"]') || ul.parentElement;
+        if (!container || container.querySelector('.igx-carousel-bar')) return;
+
+        const bar = document.createElement('div');
+        bar.className = 'igx-carousel-bar';
+        bar.innerHTML =
+          '<button type="button" class="igx-carousel-copy-meta" title="Скопировать данные карусели (дни, просмотры, лайки, комментарии, репосты, описание)">📋 Данные</button>' +
+          '<button type="button" class="igx-carousel-ocr" title="Извлечь текст из слайдов карусели">📝 Слайды</button>';
+        container.appendChild(bar);
+
+        const ocrBtn = bar.querySelector('.igx-carousel-ocr');
+        if (ocrBtn) {
+          ocrBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            openOcrPopup('carousel');
+          });
+          ocrBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
+          ocrBtn.addEventListener('mousedown', (e) => e.stopPropagation());
+        }
+
+        const copyBtn = bar.querySelector('.igx-carousel-copy-meta');
+        if (copyBtn) {
+          copyBtn.addEventListener('click', async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            try {
+              const article = findPostArticle(container);
+              const postMeta = extractInstagramPostData(article || container);
+              const metaStr = formatPostDataText(postMeta);
+              const ok = await copyToClipboard(metaStr);
+              if (ok) {
+                copyBtn.textContent = '✓ Скопировано';
+                setTimeout(() => {
+                  copyBtn.textContent = '📋 Данные';
+                }, 2000);
+              }
+            } catch (_) {}
+          });
+          copyBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
+          copyBtn.addEventListener('mousedown', (e) => e.stopPropagation());
+        }
+      });
+    } catch (_) {}
+  }
+
   function fmtTime(s) {
     if (!isFinite(s)) return '—';
     s = Math.max(0, Math.floor(s));
@@ -812,18 +863,64 @@
     bar.innerHTML =
       '<div class="igx-seek-track"><div class="igx-seek-fill"></div><div class="igx-seek-knob"></div></div>' +
       '<span class="igx-seek-time">0:00 / 0:00</span>' +
+      '<button type="button" class="igx-seek-copy-meta" title="Скопировать данные ролика (дни, просмотры, лайки, комменты, репосты, описание)">📋</button>' +
       '<button type="button" class="igx-seek-ocr" title="Извлечь хук и призыв">📝</button>';
     document.body.appendChild(bar);
 
     const ocrBtn = bar.querySelector('.igx-seek-ocr');
     if (ocrBtn) {
-      ocrBtn.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
+      const handleOcr = (e) => {
+        if (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+        }
         openOcrPopup(ocrBtn);
+      };
+      ocrBtn.addEventListener('click', handleOcr);
+      ocrBtn.addEventListener('pointerdown', (e) => {
+        e.stopPropagation();
+        if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
       });
-      ocrBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
-      ocrBtn.addEventListener('mousedown', (e) => e.stopPropagation());
+      ocrBtn.addEventListener('mousedown', (e) => {
+        e.stopPropagation();
+        if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+      });
+    }
+
+    const copyMetaSeekBtn = bar.querySelector('.igx-seek-copy-meta');
+    if (copyMetaSeekBtn) {
+      const handleCopyMeta = async (e) => {
+        if (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+        }
+        try {
+          const media = detectCurrentPostMedia();
+          const scope = (media && media.scope) || video.closest('article, [role="dialog"], main, section') || document;
+          const postMeta = extractInstagramPostData(scope);
+          const metaStr = formatPostDataText(postMeta);
+          const ok = await copyToClipboard(metaStr);
+          if (ok) {
+            copyMetaSeekBtn.textContent = '✓';
+            setTimeout(() => {
+              copyMetaSeekBtn.textContent = '📋';
+            }, 2000);
+          }
+        } catch (err) {
+          console.warn('[Insta] copy metadata failed:', err);
+        }
+      };
+      copyMetaSeekBtn.addEventListener('click', handleCopyMeta);
+      copyMetaSeekBtn.addEventListener('pointerdown', (e) => {
+        e.stopPropagation();
+        if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+      });
+      copyMetaSeekBtn.addEventListener('mousedown', (e) => {
+        e.stopPropagation();
+        if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+      });
     }
 
     const track = bar.querySelector('.igx-seek-track');
@@ -897,17 +994,41 @@
     video.addEventListener('loadedmetadata', sync);
     sync();
 
+    // Проверяем, попал ли клик в наши специальные кнопки (OCR или копирование метаданных)
+    const isSpecialBtn = (e) => {
+      if (!e) return false;
+      const t = e.target;
+      if (ocrBtn && (t === ocrBtn || ocrBtn.contains(t))) return true;
+      if (copyMetaSeekBtn && (t === copyMetaSeekBtn || copyMetaSeekBtn.contains(t))) return true;
+      if (ocrBtn && ocrBtn.isConnected) {
+        const ro = ocrBtn.getBoundingClientRect();
+        if (ro.width > 0 && e.clientX >= ro.left && e.clientX <= ro.right && e.clientY >= ro.top && e.clientY <= ro.bottom) {
+          return true;
+        }
+      }
+      if (copyMetaSeekBtn && copyMetaSeekBtn.isConnected) {
+        const rc = copyMetaSeekBtn.getBoundingClientRect();
+        if (rc.width > 0 && e.clientX >= rc.left && e.clientX <= rc.right && e.clientY >= rc.top && e.clientY <= rc.bottom) {
+          return true;
+        }
+      }
+      return false;
+    };
+
     // События ловим НА УРОВНЕ ОКНА в фазе захвата (раньше любых обработчиков ИГ).
     // «Наше» событие = либо попало в DOM полоски, либо пришло в её прямоугольник координатами —
     // так его не перехватит даже невидимый оверлей ИГ, лежащий поверх.
     const owns = (e) => {
       if (bar.style.display === 'none') return false;
+      if (isSpecialBtn(e)) return false; // Кнопки OCR и копирования обрабатывают события сами!
       if (e.target && bar.contains(e.target)) return true;
       const r = bar.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) return false;
       return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
     };
 
     const onDown = (e) => {
+      if (isSpecialBtn(e)) return;
       if (!owns(e)) return;
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -939,6 +1060,7 @@
       }
     };
     const onUp = (e) => {
+      if (isSpecialBtn(e)) return;
       if (!dragging) return;
       e.stopImmediatePropagation();
       dragging = false;
@@ -953,6 +1075,7 @@
       sync();
     };
     const onClick = (e) => {
+      if (isSpecialBtn(e)) return;
       // чтобы ИГ не ставил паузу/плей по клику через нашу полоску
       if (!owns(e)) return;
       e.preventDefault();
@@ -967,6 +1090,39 @@
   // ---------- извлечение текста из видео / слайдов (хук + призыв) ----------
   // Кнопка 📝 на полоске / в панели: снимаем кадры первых и последних секунд видео
   // или слайды карусели, прогоняем через Tesseract / Whisper, копируем результат в буфер.
+  function safeStorageGet(keys, fallback = {}) {
+    try {
+      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+        const res = chrome.storage.local.get(keys);
+        if (res && typeof res.then === 'function') {
+          return res.catch(() => fallback);
+        }
+        return new Promise((resolve) => {
+          try {
+            chrome.storage.local.get(keys, (data) => {
+              if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.lastError) resolve(fallback);
+              else resolve(data || fallback);
+            });
+          } catch (_) {
+            resolve(fallback);
+          }
+        });
+      }
+    } catch (_) {}
+    return Promise.resolve(fallback);
+  }
+
+  function safeStorageSet(obj) {
+    try {
+      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+        const res = chrome.storage.local.set(obj);
+        if (res && typeof res.catch === 'function') {
+          res.catch(() => {});
+        }
+      }
+    } catch (_) {}
+  }
+
   const OCR_START_KEY = 'igx_ocr_start_sec';
   const OCR_END_KEY = 'igx_ocr_end_sec';
   const OCR_MODE_KEY = 'igx_ocr_mode';
@@ -1441,24 +1597,30 @@
   function detectCurrentPostMedia() {
     const article = findPostArticle();
     const mediaContainer = findMediaContainer(article);
+    const scope = mediaContainer || article || document;
 
-    const nextBtn = findCarouselNextButton(article);
-    const prevBtn = findCarouselPrevButton(article);
-    const dots = article ? article.querySelectorAll('div._acaz, div[role="tablist"] > *, ul._acay > li') : [];
-    const video = article ? article.querySelector('video') : null;
+    const ul = scope.querySelector?.('ul._acay, ul[class*="acay"]');
+    const nextBtn = findCarouselNextButton(scope);
+    const prevBtn = findCarouselPrevButton(scope);
+    // Точки карусели ищем ТОЛЬКО внутри контейнера поста, а НЕ по глобальному tablist навигации Instagram!
+    const carouselMedia = ul ? (ul.closest('div._aatk, div._aamw') || ul.parentElement) : (scope.querySelector?.('div._aatk, div._aamw') || scope);
+    const dots = carouselMedia ? carouselMedia.querySelectorAll('div._acaz, div[role="tablist"] > *, ul._acay > li') : [];
+    const video = (scope.querySelector && scope.querySelector('video')) || pickBestVideo();
 
-    if (nextBtn || prevBtn || (dots && dots.length > 1) || (article && article.querySelector('ul._acay'))) {
+    if (ul || nextBtn || prevBtn || (dots && dots.length > 1)) {
       let totalSlides = dots ? dots.length : 0;
-      if (totalSlides <= 1 && article) {
-        const textIndicators = article.innerText.match(/(\d+)\s*(?:\/|из|of)\s*(\d+)/i);
-        if (textIndicators && textIndicators[2]) {
-          totalSlides = parseInt(textIndicators[2], 10);
-        }
+      const textScope = carouselMedia || scope;
+      const textContent = textScope ? (textScope.innerText || textScope.textContent || '') : '';
+      const textIndicators = textContent.match(/(\d+)\s*(?:\/|из|of)\s*(\d+)/i);
+      if (textIndicators && textIndicators[2]) {
+        const parsed = parseInt(textIndicators[2], 10);
+        if (parsed > 0 && parsed <= 30) totalSlides = parsed;
       }
       return {
         type: 'carousel',
         totalSlides: Math.max(2, totalSlides || 10),
-        scope: article,
+        scope: article || carouselMedia || document,
+        mediaContainer: carouselMedia,
         video,
       };
     }
@@ -1467,7 +1629,8 @@
       return {
         type: 'video',
         video,
-        scope: article,
+        scope: article || video.closest('article, [role="dialog"], main') || document,
+        mediaContainer: video.parentElement,
       };
     }
 
@@ -2568,44 +2731,63 @@
   }
 
   async function openOcrModal(anchorOrType) {
-    const pop = ensureOcrPopup();
-    pop.style.display = 'flex';
+    try {
+      const pop = ensureOcrPopup();
+      if (!pop) return;
 
-    chrome.storage.local.get(['igx_ocr_pos']).then((d) => {
-      if (d && d.igx_ocr_pos && d.igx_ocr_pos.left && d.igx_ocr_pos.top) {
-        const leftVal = parseInt(d.igx_ocr_pos.left, 10);
-        const topVal = parseInt(d.igx_ocr_pos.top, 10);
-        if (!isNaN(leftVal) && !isNaN(topVal)) {
-          const clampedLeft = Math.max(10, Math.min(window.innerWidth - 360, leftVal));
-          const clampedTop = Math.max(10, Math.min(window.innerHeight - 300, topVal));
-          pop.style.left = `${clampedLeft}px`;
-          pop.style.top = `${clampedTop}px`;
-          pop.style.right = 'auto';
-          pop.style.bottom = 'auto';
-          return;
-        }
-      }
+      // Сразу отображаем попап, чтобы не зависеть от асинхронного storage
+      pop.style.display = 'flex';
+      pop.style.visibility = 'visible';
+      pop.style.opacity = '1';
+      pop.style.zIndex = '2147483647';
       pop.style.top = '70px';
       pop.style.right = '24px';
       pop.style.left = 'auto';
       pop.style.bottom = 'auto';
-    });
 
-    const statusEl = pop.querySelector('.igx-ocr-status');
-    const resWrap = pop.querySelector('.igx-ocr-result-wrap');
-    if (statusEl) statusEl.textContent = '';
-    if (resWrap) resWrap.style.display = 'none';
+      safeStorageGet(['igx_ocr_pos']).then((d) => {
+        try {
+          if (d && d.igx_ocr_pos && d.igx_ocr_pos.left && d.igx_ocr_pos.top) {
+            const leftVal = parseInt(d.igx_ocr_pos.left, 10);
+            const topVal = parseInt(d.igx_ocr_pos.top, 10);
+            if (!isNaN(leftVal) && !isNaN(topVal)) {
+              const maxW = (window.innerWidth || 1000) - 360;
+              const maxH = (window.innerHeight || 800) - 300;
+              const clampedLeft = Math.max(10, Math.min(maxW, leftVal));
+              const clampedTop = Math.max(10, Math.min(maxH, topVal));
+              pop.style.left = `${clampedLeft}px`;
+              pop.style.top = `${clampedTop}px`;
+              pop.style.right = 'auto';
+              pop.style.bottom = 'auto';
+            }
+          }
+        } catch (_) {}
+      });
 
-    const media = detectCurrentPostMedia();
-    const explicitType = typeof anchorOrType === 'string' ? anchorOrType : null;
-    const type = explicitType || (media && media.type) || igxActiveMediaType || 'video';
+      const statusEl = pop.querySelector('.igx-ocr-status');
+      const resWrap = pop.querySelector('.igx-ocr-result-wrap');
+      if (statusEl) statusEl.textContent = '';
+      if (resWrap) resWrap.style.display = 'none';
 
-    const tabVideo = pop.querySelector('.igx-tab-video');
-    const tabSlides = pop.querySelector('.igx-tab-slides');
-    if (type === 'carousel') {
-      tabSlides.click();
-    } else {
-      tabVideo.click();
+      let media = null;
+      try {
+        media = detectCurrentPostMedia();
+      } catch (err) {
+        console.warn('[Insta OCR] detectCurrentPostMedia warning:', err);
+      }
+
+      const explicitType = typeof anchorOrType === 'string' ? anchorOrType : null;
+      const type = explicitType || (media && media.type) || igxActiveMediaType || 'video';
+
+      const tabVideo = pop.querySelector('.igx-tab-video');
+      const tabSlides = pop.querySelector('.igx-tab-slides');
+      if (type === 'carousel' && tabSlides) {
+        tabSlides.click();
+      } else if (tabVideo) {
+        tabVideo.click();
+      }
+    } catch (err) {
+      console.error('[Insta OCR] openOcrModal error:', err);
     }
   }
 
@@ -2819,12 +3001,25 @@
     scanForRows._t = setTimeout(() => {
       scanForRows();
       scanForVideos();
+      scanForCarousels();
       debouncedApplyFilters();
     }, 250);
   });
   observer.observe(document.body, { childList: true, subtree: true });
   scanForRows();
   scanForVideos();
+  scanForCarousels();
+
+  try {
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
+      chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+        if (msg && (msg.action === 'open_ocr_modal' || msg.action === 'open_ocr')) {
+          openOcrPopup(msg.mediaType || null);
+          sendResponse({ ok: true });
+        }
+      });
+    }
+  } catch (_) {}
 
   chrome.storage.onChanged.addListener((changes) => {
     let shouldUpdate = false;
