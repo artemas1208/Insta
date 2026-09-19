@@ -179,6 +179,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // Проверка, является ли вкладка фоновой вкладкой автопроверки —
   // content script запрашивает это, чтобы не помечать профиль «просмотренным».
+  if (msg.type === 'getTabId') {
+    sendResponse({ tabId: sender.tab ? sender.tab.id : null });
+    return true;
+  }
+
   if (msg.type === 'isQuickCheck') {
     getQuickCheckMap().then((map) => {
       sendResponse({ isQuickCheck: !!(sender.tab && map[sender.tab.id]) });
@@ -281,4 +286,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
   })();
   return true; // держим канал открытым для async sendResponse
+});
+
+
+// Очистка состояния АФК при закрытии вкладки
+chrome.tabs.onRemoved.addListener((tabId) => {
+  try {
+    chrome.storage.local.remove([`igx_afk_tab_${tabId}`]).catch(() => {});
+  } catch (_) {}
 });

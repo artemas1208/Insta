@@ -4341,7 +4341,58 @@
   // Цикл: листает модалку до конца -> чекает всех -> отчёт в бота -> берёт самого
   // популярного (до 50к сабов, у гигантов список не грузится) -> вводит слово в поиск -> повтор.
   const igxSleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const AFK_STATE_KEY = 'igx_afk_state';
+  // Состояние АФК строго изолировано для каждой вкладки (через sessionStorage + chrome.storage),
+  // чтобы можно было массово запускать АФК сразу в нескольких вкладках без конфликтов!
+  const AFK_TAB_STORAGE_KEY = 'igx_afk_tab_state';
+  const AFK_LAST_WORD_KEY = 'igx_afk_last_word';
+  try {
+    chrome.storage.local.remove('igx_afk_state');
+  } catch (_) {}
+
+  function getAfkSessionKey() {
+    try {
+      let id = sessionStorage.getItem('igx_afk_tab_id');
+      if (!id) {
+        id = 'tab_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+        sessionStorage.setItem('igx_afk_tab_id', id);
+      }
+      return 'igx_afk_' + id;
+    } catch (_) {
+      return 'igx_afk_local_tab';
+    }
+  }
+
+  function getSessionAfkState() {
+    try {
+      const raw = sessionStorage.getItem(AFK_TAB_STORAGE_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function setSessionAfkState(st) {
+    try {
+      if (st) {
+        sessionStorage.setItem(AFK_TAB_STORAGE_KEY, JSON.stringify(st));
+      } else {
+        sessionStorage.removeItem(AFK_TAB_STORAGE_KEY);
+      }
+    } catch (_) {}
+  }
+
+  let cachedTabId = null;
+  async function getTabId() {
+    if (cachedTabId !== null) return cachedTabId;
+    try {
+      const res = await igxSend({ type: 'getTabId' }, 1500);
+      if (res && typeof res.tabId === 'number') {
+        cachedTabId = res.tabId;
+        return cachedTabId;
+      }
+    } catch (_) {}
+    return null;
+  }
   const AFK_MAX_FOLLOWERS = 50000;
   // ИГ редиректит /followers/ → mutualOnly (только твои подписки).
   // Нужен mutualFirst — полный список подписчиков (сначала общие, потом все).
@@ -4380,16 +4431,70 @@
     return false;
   }
 
-  function afkGetState() {
-    return chrome.storage.local.get(AFK_STATE_KEY).then((d) => d[AFK_STATE_KEY] || null);
+  async function afkGetState() {
+    // 1. Сначала читаем из sessionStorage этой конкретной вкладки (мгновенно и полностью изолированно)
+    const mem = getSessionAfkState();
+    if (mem && typeof mem === 'object') return mem;
+
+    // 2. Читаем из storage по ключу сессии вкладки
+    const key = getAfkSessionKey();
+    try {
+      const d = await chrome.storage.local.get(key);
+      if (d && d[key]) {
+        setSessionAfkState(d[key]);
+        return d[key];
+      }
+    } catch (_) {}
+
+    // 3. Запасной вариант: проверяем tabId
+    try {
+      const tabId = await getTabId();
+      if (tabId) {
+        const tabKey = `igx_afk_tab_${tabId}`;
+        const td = await chrome.storage.local.get(tabKey);
+        if (td && td[tabKey]) {
+          setSessionAfkState(td[tabKey]);
+          return td[tabKey];
+        }
+      }
+    } catch (_) {}
+
+    return null;
   }
+
   async function afkPatchState(patch) {
     const cur = (await afkGetState()) || {};
-    const st = Object.assign({ on: false, word: '', visited: [], lists: [], needSearch: false }, cur, patch);
-    await chrome.storage.local.set({ [AFK_STATE_KEY]: st });
+    const st = Object.assign({ on: false, word: '', visited: [], lists: [], needSearch: false, plainTried: false, jumped: false }, cur, patch);
+
+    // Сохраняем в sessionStorage этой вкладки
+    setSessionAfkState(st);
+
+    // Сохраняем в storage под индивидуальным ключом вкладки
+    const key = getAfkSessionKey();
+    try {
+      await chrome.storage.local.set({ [key]: st });
+    } catch (_) {}
+
+    // Дублируем по tabId
+    try {
+      const tabId = await getTabId();
+      if (tabId) {
+        await chrome.storage.local.set({ [`igx_afk_tab_${tabId}`]: st });
+      }
+    } catch (_) {}
+
+    // Сохраняем последнее введённое слово как глобальное значение по умолчанию для новых вкладок
+    if (patch && typeof patch.word === 'string' && patch.word.trim()) {
+      try {
+        await chrome.storage.local.set({ [AFK_LAST_WORD_KEY]: patch.word.trim() });
+      } catch (_) {}
+    }
+
     return st;
   }
+
   async function afkRunning() {
+    if (afkBusy) return true;
     const st = await afkGetState();
     return !!(st && st.on);
   }
@@ -4641,7 +4746,19 @@
   }
 
   async function afkStop(reason) {
+    afkBusy = false;
     await afkPatchState({ on: false, needSearch: false });
+    setSessionAfkState(null);
+    const key = getAfkSessionKey();
+    try {
+      await chrome.storage.local.remove(key);
+    } catch (_) {}
+    const tabId = await getTabId();
+    if (tabId) {
+      try {
+        await chrome.storage.local.remove(`igx_afk_tab_${tabId}`);
+      } catch (_) {}
+    }
     afkSetBtn(false);
     if (sidePanelEl) {
       const chk = sidePanelEl.querySelector('.igx-chk-afk');
@@ -4861,9 +4978,8 @@
   async function startAfk() {
     const wordEl = sidePanelEl && sidePanelEl.querySelector('.igx-afk-word');
     const word = wordEl ? wordEl.value.trim() : '';
-    await chrome.storage.local.set({
-      [AFK_STATE_KEY]: { on: true, word, visited: [], lists: [], needSearch: true, plainTried: false, jumped: false },
-    });
+    afkBusy = true;
+    await afkPatchState({ on: true, word, visited: [], lists: [], needSearch: true, plainTried: false, jumped: false });
     afkSetBtn(true);
     // Пытаемся открыть список подписчиков автоматически, если модалка ещё не открыта.
     const box = await afkEnsureList(25000);
@@ -4981,9 +5097,12 @@
 
   // Возобновление АФК после перехода: вкладка перезагрузилась на профиле или /подписчиках следующего чела.
   (async () => {
+    // В фоновых вкладках автопроверки — сразу выходим, не трогая storage
+    try {
+      if (await isQuickCheckTab()) return;
+    } catch (_) {}
     const st = await afkGetState();
     if (!st || !st.on) return;
-    if (await isQuickCheckTab()) return; // фоновые вкладки проверок — не трогаем
     const path = location.pathname;
     const onFollowers = afkIsFollowersPage();
     const onProfile = /^\/[A-Za-z0-9._]{1,30}\/?$/i.test(path);
@@ -4998,6 +5117,7 @@
         return;
       }
     }
+    afkBusy = true;
     const markAfkChk = () => {
       const chk = sidePanelEl && sidePanelEl.querySelector('.igx-chk-afk');
       if (chk) chk.checked = true;
@@ -5240,12 +5360,24 @@
       const afkWord = sidePanelEl.querySelector('.igx-afk-word');
       const afkChk = sidePanelEl.querySelector('.igx-chk-afk');
       afkGetState().then((st) => {
-        if (!st) return;
-        // Галочку не восстанавливаем из storage — иначе кнопка всегда запускает АФК, а не проверку списка.
-        if (afkWord && st.word) afkWord.value = st.word;
+        if (st && st.word && afkWord) {
+          afkWord.value = st.word;
+        } else if (afkWord && !afkWord.value) {
+          chrome.storage.local.get(AFK_LAST_WORD_KEY, (d) => {
+            if (d && d[AFK_LAST_WORD_KEY] && afkWord && !afkWord.value) {
+              afkWord.value = d[AFK_LAST_WORD_KEY];
+            }
+          });
+        }
+        if (st && st.on) {
+          if (afkChk) afkChk.checked = true;
+          afkSetBtn(true);
+        }
       });
       afkWord.addEventListener('input', async (e) => {
-        await afkPatchState({ word: e.target.value });
+        const val = e.target.value;
+        await afkPatchState({ word: val });
+        chrome.storage.local.set({ [AFK_LAST_WORD_KEY]: val.trim() });
       });
       afkChk.addEventListener('change', async (e) => {
         if (!e.target.checked && (await afkRunning())) await afkStop('остановлено галочкой.');
