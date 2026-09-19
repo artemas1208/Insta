@@ -1,0 +1,88 @@
+{
+  "manifest_version": 3,
+  "name": "IG Lead Scout",
+  "version": "1.0.0",
+  "description": "Подсветка просмотренных профилей и поиск экспертов с Telegram-ссылкой в Instagram.",
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "tabs",
+    "tabCapture",
+    "system.display",
+    "alarms",
+    "scripting",
+    "tabGroups",
+    "offscreen",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "<all_urls>",
+    "https://*.cdninstagram.com/*",
+    "https://*.fbcdn.net/*",
+    "https://*.hf-mirror.com/*",
+    "https://*.huggingface.co/*",
+    "https://api.telegram.org/*",
+    "https://cdn.jsdelivr.net/*",
+    "https://hf-mirror.com/*",
+    "https://huggingface.co/*",
+    "https://t.me/*",
+    "https://telegram.me/*",
+    "https://web.telegram.org/*",
+    "https://www.instagram.com/*",
+    "https://api.groq.com/*",
+    "https://api.openai.com/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "classic"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.instagram.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://web.telegram.org/*"
+      ],
+      "js": [
+        "tg-web.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "lib/*"
+      ],
+      "matches": [
+        "https://www.instagram.com/*"
+      ]
+    }
+  ]
+}
