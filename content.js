@@ -4264,7 +4264,7 @@
       return;
     }
 
-    const dialog = document.querySelector('[role="dialog"]');
+    const dialog = afkDialog();
     if (!dialog) {
       const anchor = sidePanelEl || document.body;
       showTooltip('Открой модалку подписчиков или подписок', anchor);
@@ -4397,7 +4397,7 @@
   // ИГ редиректит /followers/ → mutualOnly (только твои подписки).
   // Нужен mutualFirst — полный список подписчиков (сначала общие, потом все).
   const AFK_FOLLOWERS_MODE = 'mutualFirst';
-  let afkBusy = false;
+  let afkLoopActive = false;
 
   function afkFollowersUrl(username) {
     return `https://www.instagram.com/${username}/followers/${AFK_FOLLOWERS_MODE}`;
@@ -4494,12 +4494,15 @@
   }
 
   async function afkRunning() {
-    if (afkBusy) return true;
+    if (afkLoopActive) return true;
     const st = await afkGetState();
     return !!(st && st.on);
   }
 
   function afkDialog() {
+    for (const d of document.querySelectorAll('[role="dialog"]')) {
+      if (afkUserCount(d) > 0 || d.querySelector('input')) return d;
+    }
     return document.querySelector('[role="dialog"]');
   }
 
@@ -4746,7 +4749,7 @@
   }
 
   async function afkStop(reason) {
-    afkBusy = false;
+    afkLoopActive = false;
     await afkPatchState({ on: false, needSearch: false });
     setSessionAfkState(null);
     const key = getAfkSessionKey();
@@ -4797,6 +4800,15 @@
     const btn = panel.querySelector('.igx-btn-autocheck');
     if (!btn) return;
     btn.textContent = '🤖 АФК: листаю список до конца… — нажми для стопа';
+    btn.className = 'igx-btn-autocheck is-running';
+  }
+
+  function afkSetBtnText(text) {
+    const panel = document.querySelector('.igx-side-panel');
+    if (!panel) return;
+    const btn = panel.querySelector('.igx-btn-autocheck');
+    if (!btn) return;
+    btn.textContent = text;
     btn.className = 'igx-btn-autocheck is-running';
   }
 
@@ -4930,55 +4942,132 @@
     return bestNew || best;
   }
 
-  // Ввести слово в поиск списка. Возврат: 'ok' | 'empty' (по слову никого) | 'failed' (ввести не вышло)
-  // | 'noinput' (поля поиска в этом списке нет вообще).
-  // Раньше если поле не находилось — молча чекали ВСЕХ подряд. Теперь это явный стоп:
-  // проверять неотфильтрованный список опасно и бессмысленно.
+  // Поиск поля ввода поиска внутри модалки списка (исключая UI расширения)
+  function afkFindSearchInput(root) {
+    const scope = root || afkDialog() || document;
+    const allInputs = scope.querySelectorAll('input');
+    // 1. Поле с признаком поиска (Search / Поиск)
+    for (const inp of allInputs) {
+      if (inp.closest('.igx-side-panel, .igx-ocr-pop, .igx-tooltip')) continue;
+      const type = (inp.getAttribute('type') || 'text').toLowerCase();
+      if (type !== 'text' && type !== 'search') continue;
+      const ph = (inp.getAttribute('placeholder') || '').toLowerCase();
+      const aria = (inp.getAttribute('aria-label') || '').toLowerCase();
+      if (/search|поиск/i.test(ph) || /search|поиск/i.test(aria)) {
+        const r = inp.getBoundingClientRect();
+        if (r.width > 20 && r.height >= 8) return inp;
+      }
+    }
+    // 2. Любое видимое текстовое поле в модалке
+    for (const inp of allInputs) {
+      if (inp.closest('.igx-side-panel, .igx-ocr-pop, .igx-tooltip')) continue;
+      const type = (inp.getAttribute('type') || 'text').toLowerCase();
+      if (type !== 'text' && type !== 'search') continue;
+      const r = inp.getBoundingClientRect();
+      if (r.width > 40 && r.height >= 8) return inp;
+    }
+    return null;
+  }
+
+  // Надёжный ввод текста в React-инпут Инстаграма
+  async function afkSetInputValue(input, val) {
+    if (!input) return false;
+    try {
+      input.focus();
+    } catch (_) {}
+
+    // 1. Выделяем всё и очищаем
+    try {
+      input.select();
+      document.execCommand('selectAll', false, null);
+      document.execCommand('delete', false, null);
+    } catch (_) {}
+
+    // 2. Вводим текст через execCommand (браузер генерирует нативные события с вводом)
+    let typed = false;
+    if (val) {
+      try {
+        typed = document.execCommand('insertText', false, val);
+      } catch (_) {}
+    }
+
+    // 3. Фолбэк нативным сеттером + сброс React _valueTracker
+    if (!typed || input.value !== val) {
+      try {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+        if (setter) {
+          setter.call(input, val);
+        } else {
+          input.value = val;
+        }
+      } catch (_) {
+        input.value = val;
+      }
+      try {
+        if (input._valueTracker) {
+          input._valueTracker.setValue('__igx_reset__');
+        }
+      } catch (_) {}
+    }
+
+    // 4. Диспатчим события для React 16/17/18 и Instagram
+    try {
+      input.dispatchEvent(new Event('focus', { bubbles: true }));
+      input.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, data: val, inputType: val ? 'insertText' : 'deleteContentBackward' }));
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, data: val, inputType: val ? 'insertText' : 'deleteContentBackward' }));
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter', code: 'Enter', keyCode: 13, which: 13 }));
+      input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: 'Enter', code: 'Enter', keyCode: 13, which: 13 }));
+    } catch (_) {}
+
+    return input.value === val;
+  }
+
+  async function afkClearWord(box) {
+    const root = box || afkDialog() || document;
+    const input = afkFindSearchInput(root);
+    if (!input) return;
+    await afkSetInputValue(input, '');
+    await igxSleep(1200);
+  }
+
+  // Ввести слово в поиск списка. Возврат: 'ok' | 'empty' (по слову никого) | 'failed' (ввести не вышло) | 'noinput'
   async function afkTypeWord(word, box) {
     if (!word) return 'ok';
     const root = box || afkDialog() || document;
     let input = null;
-    for (let i = 0; i < 50 && !input; i++) {
-      // Ищем ЛЮБОЙ видимый текстовый инпут в модалке: ИГ не всегда ставит
-      // type="search"/placeholder, из-за чего старый селектор поле не находил.
-      for (const inp of root.querySelectorAll('input')) {
-        const t = (inp.getAttribute('type') || 'text').toLowerCase();
-        if (t !== 'text' && t !== 'search') continue;
-        const r = inp.getBoundingClientRect();
-        if (r.width > 40 && r.height >= 8) {
-          input = inp;
-          break;
-        }
-      }
-      if (!input) await igxSleep(400);
+    for (let i = 0; i < 30 && !input; i++) {
+      input = afkFindSearchInput(root);
+      if (!input) await igxSleep(300);
     }
     if (!input) return 'noinput';
-    // React-инпут: значение ставим нативным сеттером, иначе ИГ его не увидит.
-    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-    for (let attempt = 0; attempt < 4; attempt++) {
-      input.focus();
-      setter.call(input, word);
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new Event('change', { bubbles: true }));
-      await igxSleep(700);
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await afkSetInputValue(input, word);
+      await igxSleep(600);
       if (input.value === word) break;
-      // Фолбэк: выделить всё и вставить через execCommand — React такое надёжно ест
-      try {
-        input.focus();
-        input.select();
-        document.execCommand('insertText', false, word);
-      } catch (_) {}
-      await igxSleep(700);
     }
-    if (input.value !== word) return 'failed'; // слово так и не вошло в поле, чекать такой список нельзя
-    await igxSleep(3000); // даём ИГ отфильтровать список по слову
-    return afkUserCount(root) > 0 ? 'ok' : 'empty';
+    if (input.value !== word) return 'failed';
+
+    // Ждём загрузки отфильтрованных результатов от Инстаграма
+    const t0 = Date.now();
+    let count = 0;
+    while (Date.now() - t0 < 8000) {
+      await igxSleep(600);
+      count = afkUserCount(root);
+      if (count > 0) return 'ok';
+      const text = (root.innerText || '').toLowerCase();
+      if (/ничего не найдено|результатов нет|нет результатов|no results found|no results/i.test(text)) {
+        return 'empty';
+      }
+    }
+    return count > 0 ? 'ok' : 'empty';
   }
 
   async function startAfk() {
     const wordEl = sidePanelEl && sidePanelEl.querySelector('.igx-afk-word');
     const word = wordEl ? wordEl.value.trim() : '';
-    afkBusy = true;
     await afkPatchState({ on: true, word, visited: [], lists: [], needSearch: true, plainTried: false, jumped: false });
     afkSetBtn(true);
     // Пытаемся открыть список подписчиков автоматически, если модалка ещё не открыта.
@@ -4992,8 +5081,8 @@
   }
 
   async function afkLoop() {
-    if (afkBusy) return;
-    afkBusy = true;
+    if (afkLoopActive) return;
+    afkLoopActive = true;
     afkSetBtn(true); // в т.ч. после перезагрузки страницы при возобновлении
     try {
       while (true) {
@@ -5042,20 +5131,34 @@
         await afkEnsureFollowersTab(box);
         if (!(await afkEnsureMutualFirst())) return;
         // Слово вводится в КАЖДОМ списке: и в первом, и после каждого прыжка.
-        if (st0.needSearch) {
+        if (st0.needSearch && st0.word) {
           await afkPatchState({ needSearch: false });
-          const res = await afkTypeWord(st0.word || '', box);
+          const res = await afkTypeWord(st0.word, box);
           if (res === 'failed') {
             await afkStop('не смог ввести слово в поиск модалки.');
-            break;
-          }
-          if (res === 'empty') {
-            await afkStop(`по слову «${st0.word}» в этом списке никого нет.`);
             break;
           }
           if (res === 'noinput') {
             await afkStop(`в этом списке нет поля поиска — слово «${st0.word}» ввести некуда. Открой список, где есть поиск, или убери слово.`);
             break;
+          }
+          if (res === 'empty') {
+            // В этом конкретном списке по слову никого нет: не останавливаем весь АФК!
+            // Очищаем поиск, чтобы вернуть общий список, и прыгаем к следующему кандидату.
+            afkSetBtnText(`🤖 АФК: «${st0.word}» не найден, беру следующего…`);
+            await afkClearWord(box);
+            await igxSleep(1500);
+            const next = await afkPickNext(box);
+            if (!next) {
+              await afkStop(`по слову «${st0.word}» никого нет, и в списке больше нет кандидатов.`);
+              break;
+            }
+            const stNow = await afkGetState();
+            const visited = new Set((stNow && stNow.visited) || []);
+            visited.add(next.username.toLowerCase());
+            await afkPatchState({ visited: Array.from(visited), needSearch: true, jumped: true });
+            location.href = afkFollowersUrl(next.username);
+            return;
           }
         }
         afkSetBtnScroll();
@@ -5072,7 +5175,15 @@
         }
         await afkSendReport(checked, startedAt);
         if (!(await afkRunning())) break;
-        const next = await afkPickNext(box);
+        let next = await afkPickNext(box);
+        if (!next && st0.word) {
+          // Если среди отфильтрованных по слову брать больше некого —
+          // очищаем поле поиска, чтобы взять кандидата для следующего прыжка из общего списка!
+          afkSetBtnText('🤖 АФК: ищу следующего кандидата…');
+          await afkClearWord(box);
+          await igxSleep(1500);
+          next = await afkPickNext(box);
+        }
         if (!next) {
           await afkStop('брать больше некого — остались только проверенные или гиганты (>50к).');
           break;
@@ -5090,7 +5201,7 @@
     } catch (_) {
       await afkStop('внутренняя ошибка цикла.');
     } finally {
-      afkBusy = false;
+      afkLoopActive = false;
       if (!(await afkRunning())) afkSetBtn(false);
     }
   }
@@ -5117,7 +5228,6 @@
         return;
       }
     }
-    afkBusy = true;
     const markAfkChk = () => {
       const chk = sidePanelEl && sidePanelEl.querySelector('.igx-chk-afk');
       if (chk) chk.checked = true;
@@ -5341,7 +5451,7 @@
         const chk = sidePanelEl.querySelector('.igx-chk-afk');
         const afkOn = chk && chk.checked;
         if (afkOn) {
-          if (afkBusy || (await afkRunning())) {
+          if (afkLoopActive || (await afkRunning())) {
             await afkStop('остановлено вручную.');
           } else {
             try {

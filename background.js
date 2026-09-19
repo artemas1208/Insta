@@ -181,7 +181,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // content script запрашивает это, чтобы не помечать профиль «просмотренным».
   if (msg.type === 'getTabId') {
     sendResponse({ tabId: sender.tab ? sender.tab.id : null });
-    return true;
+    return false;
   }
 
   if (msg.type === 'isQuickCheck') {
